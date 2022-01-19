@@ -30,6 +30,10 @@ func (r *Resolver) discoverRootServers(ctx context.Context) error {
 
 		if resp.Rcode != dns.RcodeSuccess {
 			err = fmt.Errorf("cannot determine root name servers: %s", dns.RcodeToString[resp.Rcode])
+
+			// Normally we stop querying as soon as we get any kind of
+			// response, but since we can't do anything at all without knowing
+			// the root servers we try a bit harder here and keep going.
 			continue
 		}
 

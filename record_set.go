@@ -4,29 +4,25 @@ import "time"
 
 // RecordSet represents the response to a DNS query.
 type RecordSet struct {
-	// QueryType is the type of query that has been sent, such as "A", "AAAA",
-	// "SRV", etc.
-	//
-	// QueryType is set even in case of network errors.
-	QueryType string
-
 	// Name is the fully qualified domain name of this record set. The trailing
 	// dot is omitted.
 	//
-	// Name is set even in case of network errors.
+	// Name is set even in case of network errors, in which case it is the
+	// domainName argument to Resolver.Query.
 	Name string
 
-	// ResponseType is the type of the DNS response returned by the name
+	// Type is the type of the DNS response returned by the name
 	// server, such as "A", "AAAA", "SRV", etc.
 	//
-	// If the response indicates an error, ResponseType is set to a string
+	// Type is set even in case of network errors, in which case it is the
+	// recordType argument to Resolver.Query.
+	//
+	// If the response indicates an error, Type is set to a string
 	// representation of that error, such as "NXDOMAIN", "SERVFAIL", etc.
-	ResponseType string
+	Type string
 
-	// TTL is the time-to-live of this DNS response, as returned by the name
-	// server. If the name server is a caching name server, this is not
-	// necessarily the same as the maximum TTL that the authoritative name
-	// server would advice.
+	// TTL is the smallest time-to-live of the records in this set, as returned
+	// by the name server.
 	TTL time.Duration
 
 	// Values contains the values of each record in the DNS response, in the
@@ -41,8 +37,14 @@ type RecordSet struct {
 	NameServerAddress string
 
 	// Age is the amount of time that has passed since the response was cached
-	// by a Resolver. Age is zero if the RecordSet has not been added to the
-	// cache.
+	// by a Resolver.
+	//
+	// Age is
+	// - negative if the RecordSet has not been added to the cache,
+	// - zero if the query for this RecordSet caused it to be added to the
+	//   cache,
+	// - positive if it was present in the cache before the query for this
+	//   RecordSet has started.
 	Age time.Duration
 
 	// RTT is the measured round-trip time for this record set, i.e. the

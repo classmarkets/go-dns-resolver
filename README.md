@@ -97,7 +97,7 @@ r := dnsresolver.New()
 //
 // Set CachePolicy to nil to disable caching again.
 r.CachePolicy = func(r dnsresolver.RecordSet) (ttl time.Duration) {
-    if r.ResponseType == "NS" {
+    if r.Type == "NS" {
         return 1*time.Minute // or r.TTL to honor the suggestion of the responding name server
     }
 

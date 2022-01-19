@@ -84,7 +84,7 @@ func DefaultCachePolicy() CachePolicy {
 	return defaultCachePolicy
 }
 func defaultCachePolicy(rs RecordSet) time.Duration {
-	if rs.ResponseType != "NS" {
+	if rs.Type != "NS" {
 		return 0
 	}
 
@@ -104,7 +104,7 @@ func defaultCachePolicy(rs RecordSet) time.Duration {
 // off-the-shelf resolver, such as dnsmasq.
 func ObeyResponderAdvice(negativeTTL time.Duration) CachePolicy {
 	return func(rs RecordSet) time.Duration {
-		if rs.ResponseType == "NXDOMAIN" {
+		if rs.Type == "NXDOMAIN" {
 			return negativeTTL
 		}
 		return rs.TTL

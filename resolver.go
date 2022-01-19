@@ -4,8 +4,11 @@ import (
 	"context"
 	"errors"
 	"net"
+	"strings"
 	"sync"
 	"time"
+
+	"github.com/miekg/dns"
 )
 
 // Resolver resolves DNS queries recursively.
@@ -40,8 +43,13 @@ type Resolver struct {
 	zoneServers map[string][]string
 	cache       map[string]cacheItem
 
-	once            sync.Once
-	rootServerAddrs []string
+	once              sync.Once
+	systemServerAddrs []string
+	rootServerAddrs   []string
+
+	// defaultPort is added to things like NS results. This should be "53" for
+	// the real world and "5354" in tests.
+	defaultPort string
 }
 
 const maxCacheSize = 10_000
@@ -113,23 +121,30 @@ func (r *Resolver) WithZoneServer(zone string, serverAddresses []string) error {
 	return nil
 }
 
-// SetRootServers specifies the IP addresses and, optionally, port for the root
-// name servers to use.
+// SetSystemServers specifies the IP addresses and, optionally, ports for the
+// resolver(s) of the operating system. These servers are only used to discover
+// the root name servers.
 //
-// This method is intended mostly for testing, but is also useful if the
-// operating system's resolver can't be trusted to get this right.
+// This method is intended mostly for testing this package, but is also useful
+// if the operating system's resolver can't be trusted to query the root zone
+// correctly, or if automatic detection fails.
 //
-// If root servers are not specified when Query is called, Resolver will use
-// the name servers configured in the operating system once to acquire the list
-// of root servers (by querying the NS record for ".", the root domain).
-func (r *Resolver) SetRootServers(serverAddresses ...string) error {
+// If SetSystemServers has not been called when Query is first called, Resolver
+// will attempt to discover the operating system's resolver(s). This is
+// platform specific. For instance, on *nix systems, /etc/resolv.conf is
+// parsed.
+//
+// Calling SetSystemServers after the first call to Query has no effect,
+// because these servers are only used once to discover the root servers and
+// the list of root servers is cached forever.
+func (r *Resolver) SetSystemServers(serverAddresses ...string) error {
 	serverAddresses, err := r.normalizeAddrs(serverAddresses)
 	if err != nil {
 		return err
 	}
 
 	r.mu.Lock()
-	r.rootServerAddrs = serverAddresses
+	r.systemServerAddrs = serverAddresses
 	r.mu.Unlock()
 
 	return nil
@@ -218,10 +233,31 @@ func (r *Resolver) ClearCache() {
 //
 // b.gtld-servers.net is not queried because c.gtld-servers.net. responded
 // (albeit with an NXDOMAIN error).
+//
+// If the name server returns an inconsistent record set,
+// - records with a name other than the domainName argument are ignored,
+// - records with a type other than the recordType argument are ignored,
+// - and RecordSet.TTL will be the smallest value amongst all other records,
+//
+// For instance, if the DNS response is as follows for whatever reason:
+//
+//     ;; QUESTION SECTION:
+//     ;example.com.                   IN      A
+//
+//     ;; ANSWER SECTION:
+//     example.com.            666     IN      A       192.0.2.0
+//     example.com.            555     IN      A       192.0.2.1
+//     foo.example.com.        444     IN      A       192.0.2.1
+//     example.com.            333     IN      AAAA    2001:db8::
+//
+// then Name will be "example.com", Type will be "A", TTL will be 555 seconds,
+// and values will be []string{"192.0.2.0", "192.0.2.1"}
 func (r *Resolver) Query(ctx context.Context, recordType string, domainName string) (RecordSet, error) {
-	var rs RecordSet
-	rs.QueryType = recordType
-	rs.ResponseType = "NXDOMAIN"
+	rs := RecordSet{
+		Name: domainName,
+		Type: recordType,
+		Age:  -1 * time.Second,
+	}
 
 	r.mu.Lock()
 	if r.CachePolicy == nil {
@@ -241,7 +277,6 @@ func (r *Resolver) Query(ctx context.Context, recordType string, domainName stri
 		}
 	})
 	r.mu.Unlock()
-
 	if err != nil {
 		return rs, err
 	}
@@ -249,11 +284,56 @@ func (r *Resolver) Query(ctx context.Context, recordType string, domainName stri
 	_ = cp
 	_ = top
 
-	// TODO: validate and normalize domainName
-	// TODO: query root servers if necessary. This seems to be, erm, interesting, on Windows:
-	// - https://gist.github.com/moloch--/9fb1c8497b09b45c840fe93dd23b1e98
-	// - https://github.com/miekg/dns/issues/334
-	// on *nix it's just dns.ClientConfigFromFile("/etc/resolv.conf")
+	// TODO: validate and normalize domainName?
 
-	return rs, errors.New("TODO")
+	c := new(dns.Client)
+	m := new(dns.Msg)
+	m.SetQuestion(dns.CanonicalName(domainName), dns.TypeA)
+	m.RecursionDesired = true
+
+	rs.NameServerAddress = "127.0.0.101:" + r.defaultPort
+	resp, _, err := c.Exchange(m, rs.NameServerAddress)
+	if err != nil {
+		return rs, err
+	}
+
+	rs.Type = "NXDOMAIN"
+
+	switch resp.Rcode {
+	case dns.RcodeSuccess:
+	case dns.RcodeNameError:
+		rs.Type = dns.RcodeToString[resp.Rcode]
+		return rs, ErrNXDomain
+	default:
+		rs.Type = dns.RcodeToString[resp.Rcode]
+		return rs, nil
+	}
+
+	if len(resp.Answer) == 0 {
+		return rs, nil
+	}
+
+	first := true
+	for _, a := range resp.Answer {
+		hdr := a.Header()
+		if hdr.Name != dns.CanonicalName(domainName) {
+			continue
+		}
+		if hdr.Rrtype != m.Question[0].Qtype {
+			continue
+		}
+
+		rs.Name = strings.TrimSuffix(hdr.Name, ".")
+		rs.Type = dns.TypeToString[hdr.Rrtype]
+
+		ttl := time.Duration(hdr.Ttl) * time.Second
+		if first || ttl < rs.TTL {
+			rs.TTL = ttl
+		}
+		first = false
+
+		rs.Values = append(rs.Values, strings.TrimPrefix(a.String(), hdr.String()))
+	}
+
+	return rs, nil
 }
