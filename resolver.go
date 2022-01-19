@@ -3,6 +3,8 @@ package dnsresolver
 import (
 	"context"
 	"errors"
+	"fmt"
+	"log"
 	"net"
 	"strings"
 	"sync"
@@ -34,6 +36,12 @@ type Resolver struct {
 	// records are evicted if necessary.
 	CachePolicy CachePolicy
 
+	LogFunc func(QueryResult)
+
+	// defaultPort is added to things like NS results. This should be "53" for
+	// the real world and "5354" in tests.
+	defaultPort string
+
 	// mu protects zoneServers and cache.
 	//
 	// zoneServers and cache contain lists of ip:port pairs and cacheItems
@@ -46,10 +54,6 @@ type Resolver struct {
 	once              sync.Once
 	systemServerAddrs []string
 	rootServerAddrs   []string
-
-	// defaultPort is added to things like NS results. This should be "53" for
-	// the real world and "5354" in tests.
-	defaultPort string
 }
 
 const maxCacheSize = 10_000
@@ -66,6 +70,7 @@ type cacheItem struct {
 // DefaultCachePolicy.
 func New() *Resolver {
 	return &Resolver{
+		defaultPort: "53",
 		zoneServers: map[string][]string{},
 		cache:       map[string]cacheItem{},
 	}
@@ -254,86 +259,203 @@ func (r *Resolver) ClearCache() {
 // and values will be []string{"192.0.2.0", "192.0.2.1"}
 func (r *Resolver) Query(ctx context.Context, recordType string, domainName string) (RecordSet, error) {
 	rs := RecordSet{
-		Name: domainName,
-		Type: recordType,
-		Age:  -1 * time.Second,
+		Name:  domainName,
+		Type:  recordType,
+		Age:   -1 * time.Second,
+		Trace: new(Trace),
 	}
 
-	r.mu.Lock()
-	if r.CachePolicy == nil {
-		r.CachePolicy = DefaultCachePolicy()
+	if _, ok := dns.StringToType[recordType]; !ok {
+		return rs, fmt.Errorf("unsupported record type: %s", recordType)
 	}
-	cp := r.CachePolicy
 
-	if r.TimeoutPolicy == nil {
-		r.TimeoutPolicy = DefaultTimeoutPolicy()
+	q := dns.Question{
+		Name:   dns.CanonicalName(domainName),
+		Qtype:  dns.StringToType[recordType],
+		Qclass: dns.ClassINET,
 	}
-	top := r.TimeoutPolicy
 
-	var err error
-	r.once.Do(func() {
-		if len(r.rootServerAddrs) == 0 {
-			err = r.discoverRootServers(ctx)
+	nsSet := r.locateResolverFor(ctx, dns.CanonicalName(domainName))
+	result := r.doQuery(ctx, q, nsSet)
+
+	rs.RTT = result.RTT
+	rs.NameServerAddress = result.ServerAddr
+
+	err := result.Error
+	if err != nil {
+		return rs, LookupError{
+			RecordType: rs.Type,
+			DomainName: rs.Name,
+			Message:    "all name servers failed; last error",
+			Cause:      err,
 		}
-	})
-	r.mu.Unlock()
-	if err != nil {
-		return rs, err
 	}
 
-	_ = cp
-	_ = top
-
-	// TODO: validate and normalize domainName?
-
-	c := new(dns.Client)
-	m := new(dns.Msg)
-	m.SetQuestion(dns.CanonicalName(domainName), dns.TypeA)
-	m.RecursionDesired = true
-
-	rs.NameServerAddress = "127.0.0.101:" + r.defaultPort
-	resp, _, err := c.Exchange(m, rs.NameServerAddress)
-	if err != nil {
-		return rs, err
-	}
-
-	rs.Type = "NXDOMAIN"
-
-	switch resp.Rcode {
-	case dns.RcodeSuccess:
-	case dns.RcodeNameError:
-		rs.Type = dns.RcodeToString[resp.Rcode]
-		return rs, ErrNXDomain
-	default:
-		rs.Type = dns.RcodeToString[resp.Rcode]
-		return rs, nil
-	}
-
-	if len(resp.Answer) == 0 {
-		return rs, nil
+	resp := result.Response
+	if resp.Rcode != dns.RcodeSuccess {
+		return rs, ErrorReponse{
+			RecordType: rs.Type,
+			DomainName: rs.Name,
+			Code:       resp.Rcode,
+		}
 	}
 
 	first := true
-	for _, a := range resp.Answer {
-		hdr := a.Header()
-		if hdr.Name != dns.CanonicalName(domainName) {
+	for _, rr := range resp.Answer {
+		hdr := rr.Header()
+		if hdr.Name != q.Name {
 			continue
 		}
-		if hdr.Rrtype != m.Question[0].Qtype {
+		if hdr.Rrtype != q.Qtype {
 			continue
 		}
-
-		rs.Name = strings.TrimSuffix(hdr.Name, ".")
-		rs.Type = dns.TypeToString[hdr.Rrtype]
-
 		ttl := time.Duration(hdr.Ttl) * time.Second
 		if first || ttl < rs.TTL {
 			rs.TTL = ttl
 		}
 		first = false
 
-		rs.Values = append(rs.Values, strings.TrimPrefix(a.String(), hdr.String()))
+		rs.Values = append(rs.Values, rrValue(rr))
+	}
+
+	rs.additional = nil
+	for _, rr := range resp.Extra {
+		hdr := rr.Header()
+		rs.additional = append(rs.additional, [...]string{
+			hdr.Name,
+			dns.TypeToString[hdr.Rrtype],
+			rrValue(rr),
+		})
 	}
 
 	return rs, nil
+}
+
+// locateResolverFor returns the set of authoritative name servers for canonicalDomainName.
+func (r *Resolver) locateResolverFor(ctx context.Context, canonicalDomainName string) nsSet {
+	var nsSet nsSet
+	if canonicalDomainName == "." {
+		nsSet = r.discoverSystemServers()
+	} else {
+		nsSet = r.locateResolverFor(ctx, parentDomain(canonicalDomainName))
+	}
+
+	q := dns.Question{
+		Name:   canonicalDomainName,
+		Qtype:  dns.TypeNS,
+		Qclass: dns.ClassINET,
+	}
+
+	result := r.doQuery(ctx, q, nsSet)
+
+	return nsResponseSet(result)
+}
+
+func parentDomain(canonicalDomainName string) string {
+	i, end := dns.NextLabel(canonicalDomainName, 0)
+	if end {
+		return "."
+	} else {
+		return canonicalDomainName[i:]
+	}
+}
+
+type QueryResult struct {
+	Question   dns.Question
+	ServerAddr string
+	RTT        time.Duration
+	Response   *dns.Msg
+	Error      error
+}
+
+func (r *Resolver) doQuery(ctx context.Context, q dns.Question, nsSet nsSet) QueryResult {
+	result := QueryResult{
+		Question: q,
+	}
+
+	if err := nsSet.Err(); err != nil {
+		result.Error = fmt.Errorf("%s %s: name server unavailable: %w",
+			dns.TypeToString[q.Qtype], q.Name, err)
+		return result
+	}
+
+	addrs := nsSet.Addrs()
+	log.Printf("Trying name servers: q=%s, addrs=%v\n", q.String(), addrs)
+	for _, addr := range addrs {
+		addr = ensurePort(addr, r.defaultPort)
+		log.Printf("Trying name servers: q=%s, addr=%v\n", q.String(), addr)
+
+		{
+			ip, _, err := net.SplitHostPort(addr)
+			if err != nil {
+				// Should never happen due to the ensurePort call above.
+				panic(err)
+			}
+
+			if net.ParseIP(ip) == nil {
+				// Servers should be specified with IP addresses, not
+				// hostnames, but this isn't necessarily always the case.
+				// nsResponseSet will try to map domain names to IP addresses
+				// using the ADDITIONAL section of the NS response, but per RFC
+				// 1034 4.2.1. the ADDITIONAL section is optional.
+				//
+				// If the ADDITIONAL section is missing (or doesn't contain a
+				// mapping for a domain name in the ANSWER or AUTHORITY
+				// section, perhaps due to misconfiguration or a bug in the
+				// server) we would have to start a new query chain to resolve
+				// those names before moving on.
+				//
+				// This can potentially introduce loops, and we have never seen
+				// this happen in the wild, so this isn't supported here.
+				//
+				// We _could_ just keep going, in which case net.Dial would
+				// implicitly use the system resolver to lookup the name
+				// servers, but the whole point of this library is to be
+				// predictable with regards to caching.
+				continue
+			}
+		}
+
+		result.ServerAddr = addr
+
+		c := new(dns.Client)
+
+		m := new(dns.Msg)
+		m.Question = []dns.Question{q}
+		m.RecursionDesired = q.Qtype == dns.TypeNS && q.Name == "."
+
+		result.Response, result.RTT, result.Error = c.ExchangeContext(ctx, m, addr)
+		r.trace(result)
+		if r.LogFunc != nil {
+			r.LogFunc(result)
+		}
+
+		log.Println(result.Error)
+		if result.Error != nil {
+			continue
+		}
+
+		return result
+	}
+
+	result.Error = errors.New("no supported name servers available")
+
+	return result
+}
+
+func (r *Resolver) trace(result QueryResult) {
+	// TODO
+}
+
+func ensurePort(addr, defaultPort string) string {
+	_, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return net.JoinHostPort(addr, defaultPort)
+	} else {
+		return addr
+	}
+}
+
+func rrValue(rr dns.RR) string {
+	return strings.TrimPrefix(rr.String(), rr.Header().String())
 }

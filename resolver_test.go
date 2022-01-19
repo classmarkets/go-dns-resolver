@@ -2,6 +2,7 @@ package dnsresolver
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -67,7 +68,9 @@ func TestResolver_SetSystemServers_AddressNormalization(t *testing.T) {
 }
 
 func TestResolver_DiscoverRootServers(t *testing.T) {
-	_, err := New().Query(context.Background(), "A", "google.com")
+	r := New()
+	r.LogFunc = DebugLog(t)
+	_, err := r.Query(context.Background(), "A", "google.com")
 	assert.NoError(t, err)
 }
 
@@ -85,6 +88,7 @@ func TestResolver_Query_SimpleARecord(t *testing.T) {
 	defer cancel()
 
 	rs, err := r.Query(ctx, "A", "example.com")
+	t.Logf("Trace:\n" + rs.Trace.Dump())
 	assert.NoError(t, err)
 
 	assert.Equal(t, "example.com", rs.Name)
@@ -93,6 +97,23 @@ func TestResolver_Query_SimpleARecord(t *testing.T) {
 	assert.Equal(t, []string{"192.0.2.0"}, rs.Values) // TODO: , "192.0.2.1"})
 	assert.Equal(t, "127.0.0.101:5354", rs.NameServerAddress)
 	assert.Equal(t, rs.Age, -1*time.Second)
-	// TODO: RTT > 0 assert.Equal(t, rs.RTT, -1*time.Second)
-	// TODO: Trace
+	assert.Greater(t, rs.RTT, time.Duration(0))
+
+	return
+
+	wantTrace := strings.TrimSpace(`
+? . IN NS @127.0.0.250:5354 0ms
+  ! . 321 IN NS self.test.
+  ! self.test. 321 IN A 127.0.0.250
+	? com. IN NS @127.0.0.200:5354 0ms
+	  ! com. 321 IN NS gtld-server.net.test.
+	  ! gtld-server.net.test. 321 IN A 127.0.0.100
+		? example.com. IN NS @127.0.0.100:5354 0ms
+		  ! example.com. 321 IN NS 0.iana-server.net.test.
+		  ! 0.iana-server.net.test. 321 IN A 127.0.0.101
+			? example.com. IN A @127.0.0.101:5354 0ms
+			  ! example.com. 321 IN A 192.0.2.0
+	`)
+
+	assert.Equal(t, wantTrace, rs.Trace.Dump())
 }

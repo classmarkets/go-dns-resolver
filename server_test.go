@@ -116,6 +116,25 @@ type Lab struct {
 	ZoneServers map[string]*TestServer
 }
 
+func DebugLog(t *testing.T) func(QueryResult) {
+	return func(result QueryResult) {
+		q := result.Question
+		resp := result.Response
+		err := result.Error
+
+		t.Logf("%s\t@%s %dms\n", strings.TrimPrefix(q.String(), ";"), result.ServerAddr, result.RTT.Milliseconds())
+		if err != nil {
+			t.Logf("\t%v\n", err)
+		} else if resp.Rcode != dns.RcodeSuccess {
+			t.Logf("\t%s\n", dns.RcodeToString[resp.Rcode])
+		} else {
+			for _, rr := range append(resp.Answer, resp.Extra...) {
+				t.Logf("\t%s\n", rr.String())
+			}
+		}
+	}
+}
+
 // NewLab starts a root name server, a tld name server, the name servers
 // defined by zoneServers, and configured r to use the root server.
 //
@@ -127,9 +146,9 @@ type Lab struct {
 func NewLab(t *testing.T, r *Resolver, zones map[string]string) *Lab {
 	r.defaultPort = "5354"
 	r.systemServerAddrs = []string{"127.0.0.250"}
+	r.LogFunc = DebugLog(t)
 
 	lab := &Lab{
-		RootServer:  NewRootServer(t, "127.0.0.250", "127.0.0.100"),
 		ZoneServers: map[string]*TestServer{},
 	}
 
@@ -154,8 +173,11 @@ func NewLab(t *testing.T, r *Resolver, zones map[string]string) *Lab {
 	}
 
 	tw.Flush()
-	t.Log("TLD zonefile:\n" + buf.String())
+
 	lab.TLDServer = NewTestServer(t, "127.0.0.100", buf.String())
+	lab.RootServer = NewRootServer(t, "127.0.0.250", "127.0.0.100")
+
+	t.Log("TLD zonefile:\n" + buf.String())
 
 	return lab
 }

@@ -1,6 +1,12 @@
 package dnsresolver
 
-import "time"
+import (
+	"net"
+	"strings"
+	"time"
+
+	"github.com/miekg/dns"
+)
 
 // RecordSet represents the response to a DNS query.
 type RecordSet struct {
@@ -30,6 +36,8 @@ type RecordSet struct {
 	// record sets.
 	Values []string
 
+	additional [][3]string // name, type, value; wire-format
+
 	// NameServerAddress contains the IP address and port of the name server
 	// that has returned this record set.
 	//
@@ -57,10 +65,43 @@ type RecordSet struct {
 	// response, obviously).
 	RTT time.Duration
 
-	// Trace reports which name servers have answered queries.
-	// TODO: make docs specific
-	Trace []RecordSet
+	// Trace reports all DNS queries that where necessary to retrieve this
+	// RecordSet.
+	Trace     *Trace
+	traceNode *TraceNode
 
 	// TODO: Authoritative bool?
 	// TODO: FromCache bool?
+}
+
+func (rs *RecordSet) findAdditionalIPRecords(name string) []string {
+	var ips []string
+
+	for _, r := range rs.additional {
+		if dns.CanonicalName(r[1]) != "A" && r[1] != "AAAA" {
+			continue
+		}
+		if dns.CanonicalName(r[0]) != dns.CanonicalName(name) {
+			continue
+		}
+		if net.ParseIP(r[2]) == nil {
+			continue
+		}
+
+		ips = append(ips, r[1])
+	}
+
+	return ips
+}
+
+func newRecordSet(typ, name string, trace *Trace) *RecordSet {
+	if name != "." {
+		name = strings.TrimSuffix(name, ".")
+	}
+	return &RecordSet{
+		Name:  name,
+		Type:  typ,
+		Age:   -1 * time.Second,
+		Trace: trace,
+	}
 }
