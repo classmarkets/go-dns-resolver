@@ -4,8 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
-	"strconv"
 	"sync"
 	"time"
 
@@ -271,39 +271,43 @@ func (r *Resolver) Query(ctx context.Context, recordType string, domainName stri
 		return rs, fmt.Errorf("unsupported record type: %s", recordType)
 	}
 
-	nsSet := r.discoverSystemServers()
 	q := dns.Question{
-		Name:   ".",
-		Qtype:  dns.TypeNS,
-		Qclass: dns.ClassINET,
-	}
-
-	result := r.doQuery(ctx, q, nsSet, rs.Trace)
-	if result.Error != nil {
-		return rs, fmt.Errorf("discover root name servers: %w", result.Error)
-	}
-	nsSet = nsResponseSet(result)
-
-	q = dns.Question{
 		Name:   dns.CanonicalName(domainName),
 		Qtype:  dns.StringToType[recordType],
 		Qclass: dns.ClassINET,
 	}
 
+	result := r.queryIteratively(ctx, q, rs.Trace)
+	err := rs.fromResult(result)
+
+	return rs, err
+}
+
+func (r *Resolver) queryIteratively(ctx context.Context, q dns.Question, trace *Trace) queryResult {
+	nsSet := r.discoverSystemServers()
+	rootNSQuery := dns.Question{
+		Name:   ".",
+		Qtype:  dns.TypeNS,
+		Qclass: dns.ClassINET,
+	}
+
+	result := r.doQuery(ctx, rootNSQuery, nsSet, trace)
+	if result.Error != nil {
+		result.Error = fmt.Errorf("discover root name servers: %w", result.Error)
+		return result
+	}
+	nsSet = nsResponseSet(result)
+
 	for {
-		result := r.doQuery(ctx, q, nsSet, rs.Trace)
+		result := r.doQuery(ctx, q, nsSet, trace)
 
 		if result.isDelegation() {
 			nsSet = nsResponseSet(result)
 			continue
 		}
 
-		err := rs.fromResult(result)
-
-		return rs, err
+		return result
 	}
-
-	return rs, errors.New("TODO")
 }
 
 type queryResult struct {
@@ -325,9 +329,13 @@ func (r *Resolver) doQuery(ctx context.Context, q dns.Question, nsSet nsSet, tra
 		return result
 	}
 
-	addrs := nsSet.Addrs()
-	for _, rr := range addrs {
-		addr, err := r.serverAddrFromRR(ctx, rr, trace)
+	it := newAddrIter(r, nsSet, trace)
+
+	for {
+		rr, addr, err := it.Next(ctx)
+		if err == io.EOF {
+			break
+		}
 		result.ServerAddr = addr
 		if err != nil {
 			result.Error = err
@@ -335,7 +343,7 @@ func (r *Resolver) doQuery(ctx context.Context, q dns.Question, nsSet nsSet, tra
 			continue
 		}
 
-		// addr should now be an ip:port pair (otherwise serverAddrFromRR
+		// addr should now be an ip:port pair (otherwise the address iterator
 		// messed up). We need an IP address here to prevent net.Dial from
 		// using the OS resolver implicitly.
 		host, _, err := net.SplitHostPort(addr)
@@ -382,90 +390,27 @@ func (r *Resolver) doQuery(ctx context.Context, q dns.Question, nsSet nsSet, tra
 			continue
 		}
 
+		switch result.Response.Rcode {
+		case dns.RcodeServerFailure:
+			continue
+		}
+
 		return result
 	}
 
-	result.Error = errors.New("no supported name servers available")
+	result.Error = errors.New("no name servers available")
 
 	return result
 }
 
-func (r *Resolver) serverAddrFromRR(ctx context.Context, rr dns.RR, trace *Trace) (string, error) {
-	switch rr := rr.(type) {
-	case *dns.A:
-		return net.JoinHostPort(rr.A.String(), r.defaultPort), nil
-	case *dns.AAAA:
-		return net.JoinHostPort(rr.AAAA.String(), r.defaultPort), nil
-	case *dns.SRV:
-		// From explicitly configured OS servers. We use them to discover
-		// the root name servers, so while DNS allows rr.Target to be a
-		// domain name, we have to require IP addresses here.
-		//
-		// This should have been validated by SetSystemServers, so we can panic.
-		if net.ParseIP(rr.Target) == nil {
-			panic("not an ip address: " + rr.Target)
-		}
-		return net.JoinHostPort(rr.Target, strconv.Itoa(int(rr.Port))), nil
-	case *dns.NS:
-		panic("unreachable")
-		// From a prior NS query without AUTHORITY or suitable ADDITIONAL
-		// section in the response. Example:
-		//
-		//     ; <<>> DiG 9.16.24-RH <<>> NS cmcdn.de. @a.nic.de. +norecurse
-		//     ;; global options: +cmd
-		//     ;; Got answer:
-		//     ;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 51502
-		//     ;; flags: qr; QUERY: 1, ANSWER: 0, AUTHORITY: 2, ADDITIONAL: 1
-		//
-		//     ;; OPT PSEUDOSECTION:
-		//     ; EDNS: version: 0, flags:; udp: 1452
-		//     ; COOKIE: 12e4cbd55f475a5d7e2cdf3e61e9684a60a0f37bf9d563d4 (good)
-		//     ;; QUESTION SECTION:
-		//     ;cmcdn.de.                      IN      NS
-		//
-		//     ;; AUTHORITY SECTION:
-		//     cmcdn.de.               86400   IN      NS      kara.ns.cloudflare.com.
-		//     cmcdn.de.               86400   IN      NS      jay.ns.cloudflare.com.
-		//
-		//     ;; Query time: 53 msec
-		//     ;; SERVER: 194.0.0.53#53(194.0.0.53)
-		//     ;; WHEN: Thu Jan 20 14:48:58 CET 2022
-		//     ;; MSG SIZE  rcvd: 119
-		//
-		// TODO: start a new query tree to resolve rr.Ns
-
-		/*XXX
-		q := dns.Question{
-			Name:   rr.Ns,
-			Qtype:  dns.TypeNS,
-			Qclass: dns.ClassINET,
-		}
-
-		// TODO: trace.pushRoot(rr)
-		nsSet := r.locateResolverFor(ctx, rr.Ns, trace)
-		result := r.doQuery(ctx, q, nsSet, trace)
-		// TODO: trace.popRoot()
-
-		rs := RecordSet{}
-		err := rs.fromResult(result)
-		if err != nil {
-			return "", err
-		}
-
-		return net.JoinHostPort(rs.Values[0], r.defaultPort), nil
-		*/
-	default:
-		panic(fmt.Sprintf("unexpected record type: %T", rr))
+func (r queryResult) isDelegation() bool {
+	if r.Error != nil {
+		return false
 	}
-}
 
-func (r *queryResult) isDelegation() bool {
-	// We consider the response a delegation if
-	//
-	// - the response is not authoritative,
-	// - the union of the ANSWER and AUTHORITY sections is entirely NS records,
-	// - and the ADDITIONAL contains A or AAAA records for at least one of the
-	//   NS records
+	// We consider the response a delegation if the response is not
+	// authoritative, and the union of the ANSWER and AUTHORITY sections is
+	// entirely NS records
 
 	resp := r.Response
 
@@ -473,31 +418,15 @@ func (r *queryResult) isDelegation() bool {
 		return false
 	}
 
-	if (len(resp.Answer)+len(resp.Ns)) == 0 || len(resp.Extra) == 0 {
+	if len(resp.Answer)+len(resp.Ns) == 0 {
 		return false
 	}
 
-	names := map[string]bool{}
 	for _, rr := range append(resp.Answer, resp.Ns...) {
-		ns, ok := rr.(*dns.NS)
-		if !ok {
+		if _, ok := rr.(*dns.NS); !ok {
 			return false
 		}
-		names[ns.Ns] = true
 	}
 
-	for _, rr := range resp.Extra {
-		switch rr.(type) {
-		case *dns.A:
-		case *dns.AAAA:
-		default:
-			continue
-		}
-
-		if names[rr.Header().Name] {
-			return true
-		}
-	}
-
-	return false
+	return true
 }

@@ -19,6 +19,24 @@ import (
 type Trace struct {
 	Queries []*TraceNode
 	idx     map[dns.RR]*TraceAnswer
+
+	roots []*TraceAnswer
+}
+
+func (t *Trace) pushRoot(root dns.RR) {
+	a := t.idx[root]
+	if a == nil {
+		panic("pushRoot: no answer for trace root")
+	}
+
+	t.roots = append(t.roots, a)
+}
+func (t *Trace) popRoot() {
+	if len(t.roots) == 0 {
+		panic("popRoot: empty stack")
+	}
+
+	t.roots = t.roots[:len(t.roots)-1]
 }
 
 func (t *Trace) add(result queryResult, prev dns.RR) {
@@ -31,6 +49,9 @@ func (t *Trace) add(result queryResult, prev dns.RR) {
 
 	if parent := t.idx[prev]; parent != nil {
 		parent.Next = append(parent.Next, n)
+	} else if len(t.roots) > 0 {
+		parent := t.roots[len(t.roots)-1]
+		parent.Next = append(parent.Next, n)
 	} else {
 		t.Queries = append(t.Queries, n)
 	}
@@ -38,6 +59,8 @@ func (t *Trace) add(result queryResult, prev dns.RR) {
 	if result.Response == nil {
 		return
 	}
+
+	n.Code = result.Response.Rcode
 
 	all := result.Response.Answer
 	all = append(all, result.Response.Ns...)
@@ -89,6 +112,7 @@ type TraceNode struct {
 	Server   string
 
 	Err     error
+	Code    int
 	Answers []*TraceAnswer
 
 	RTT time.Duration
@@ -105,14 +129,22 @@ func (n *TraceNode) dump(w io.Writer, depth int) {
 	if n.Err != nil {
 		io.WriteString(w, strings.Repeat(" ", depth*4))
 		fmt.Fprintf(w, "  X %v\n", n.Err)
-	} else {
-		for _, a := range n.Answers {
-			io.WriteString(w, strings.Repeat(" ", depth*4))
-			fmt.Fprintf(w, "  ! %v\n", n.fmt(a.Record))
+	}
 
-			for _, n := range a.Next {
-				n.dump(w, depth+1)
-			}
+	if n.Code != dns.RcodeSuccess {
+		io.WriteString(w, strings.Repeat(" ", depth*4))
+		fmt.Fprintf(w, "  X %s\n", dns.RcodeToString[n.Code])
+	} else if len(n.Answers) == 0 {
+		io.WriteString(w, strings.Repeat(" ", depth*4))
+		fmt.Fprintf(w, "  ~ EMPTY\n")
+	}
+
+	for _, a := range n.Answers {
+		io.WriteString(w, strings.Repeat(" ", depth*4))
+		fmt.Fprintf(w, "  ! %v\n", n.fmt(a.Record))
+
+		for _, n := range a.Next {
+			n.dump(w, depth+1)
 		}
 	}
 }

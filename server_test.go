@@ -198,13 +198,13 @@ func (h *serveHandler) Additional(rrs ...dns.RR) *serveHandler {
 }
 
 type delegationHandler struct {
-	upstreamAddr string
-	viaAuthority bool
+	upstreamAddrs []string
+	viaAuthority  bool
 }
 
-func (h *expectation) DelegateTo(addr string) *delegationHandler {
+func (h *expectation) DelegateTo(addr ...string) *delegationHandler {
 	x := &delegationHandler{
-		upstreamAddr: addr,
+		upstreamAddrs: addr,
 	}
 
 	h.testHandler = x
@@ -222,16 +222,19 @@ func (h *delegationHandler) ServeDNS(t *testing.T, w dns.ResponseWriter, r *dns.
 	m.SetRcode(r, dns.RcodeSuccess)
 	m.Authoritative = false
 
-	if net.ParseIP(h.upstreamAddr) != nil {
-		m.Answer = []dns.RR{
-			NS(t, "com.", 321, "next.test."),
-		}
-		m.Extra = []dns.RR{
-			A(t, "next.test.", 321, h.upstreamAddr),
-		}
-	} else {
-		m.Answer = []dns.RR{
-			NS(t, "com.", 321, h.upstreamAddr),
+	for i, addr := range h.upstreamAddrs {
+		name := fmt.Sprintf("ns%d.test.", i+1)
+		if net.ParseIP(addr) != nil {
+			m.Answer = append(m.Answer,
+				NS(t, "com.", 321, name),
+			)
+			m.Extra = append(m.Extra,
+				A(t, name, 321, addr),
+			)
+		} else {
+			m.Answer = append(m.Answer,
+				NS(t, "com.", 321, addr),
+			)
 		}
 	}
 

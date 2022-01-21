@@ -46,18 +46,23 @@ func (set nsResponseSet) Addrs() []dns.RR {
 	var rrs []dns.RR
 
 	for _, rr := range append(set.Response.Answer, set.Response.Ns...) {
-		ns, ok := rr.(*dns.NS)
-		if !ok {
-			continue
+		switch rr := rr.(type) {
+		case *dns.A:
+			rrs = append(rrs, rr)
+		case *dns.AAAA:
+			rrs = append(rrs, rr)
+		case *dns.CNAME:
+			rrs = append(rrs, set.tryMapIPs(rr, rr.Target)...)
+		case *dns.NS:
+			value := rr.Ns
+			if net.ParseIP(value) != nil {
+				rrs = append(rrs, rr)
+				continue
+			}
+
+			rrs = append(rrs, set.tryMapIPs(rr, rr.Ns)...)
 		}
 
-		value := ns.Ns
-		if net.ParseIP(value) != nil {
-			rrs = append(rrs, ns)
-			continue
-		}
-
-		rrs = append(rrs, set.tryMapIPs(ns)...)
 	}
 
 	return rrs // TODO: de-dup
@@ -65,10 +70,10 @@ func (set nsResponseSet) Addrs() []dns.RR {
 
 // tryMapIPs maps domain names to IP addresses using the ADDITIONAL section of
 // the NS response. If no mapping exists, name is returned as-is.
-func (set nsResponseSet) tryMapIPs(ns *dns.NS) []dns.RR {
+func (set nsResponseSet) tryMapIPs(rr dns.RR, value string) []dns.RR {
 	var rrs []dns.RR
 	for _, rr := range set.Response.Extra {
-		if rr.Header().Name != ns.Ns {
+		if rr.Header().Name != value {
 			continue
 		}
 
@@ -81,7 +86,7 @@ func (set nsResponseSet) tryMapIPs(ns *dns.NS) []dns.RR {
 	}
 
 	if len(rrs) == 0 {
-		return []dns.RR{ns}
+		return []dns.RR{rr}
 	}
 
 	return rrs
