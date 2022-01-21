@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -380,61 +381,41 @@ func (r *Resolver) doQuery(ctx context.Context, q dns.Question, nsSet nsSet, tra
 
 	addrs := nsSet.Addrs()
 	for _, rr := range addrs {
-		addr := rrValue(rr)
-		addr = ensurePort(addr, r.defaultPort)
+		addr, err := r.serverAddrFromRR(ctx, rr, trace)
+		result.ServerAddr = addr
+		if err != nil {
+			result.Error = err
+			trace.add(result, rr)
+			continue
+		}
 
-		{
-			ip, _, err := net.SplitHostPort(addr)
-			if err != nil {
-				// Should never happen due to the ensurePort call above.
-				panic(err)
-			}
+		// addr should now be an ip:port pair (otherwise serverAddrFromRR
+		// messed up). We need an IP address here to prevent net.Dial from
+		// using the OS resolver implicitly.
+		host, _, err := net.SplitHostPort(addr)
+		if err != nil {
+			result.Error = fmt.Errorf("not a host:port pair: %s: %w", addr, err)
+			trace.add(result, rr)
+			continue
+		}
 
-			if net.ParseIP(ip) == nil {
-				// Servers should be specified with IP addresses, not
-				// hostnames, but this isn't necessarily always the case.
-				// nsResponseSet will try to map domain names to IP addresses
-				// using the ADDITIONAL section of the NS response, but per RFC
-				// 1034 4.2.1. the ADDITIONAL section is optional.
-				//
-				// If the ADDITIONAL section is missing (or doesn't contain a
-				// mapping for a domain name in the ANSWER or AUTHORITY
-				// section, perhaps due to misconfiguration or a bug in the
-				// server) we would have to start a new query chain to resolve
-				// those names before moving on.
-				//
-				// This can potentially introduce loops, so we have to be
-				// careful once we takle this.
-				//
-				// Example:
-				//
-				//     ; <<>> DiG 9.16.24-RH <<>> NS cmcdn.de. @a.nic.de. +norecurse
-				//     ;; global options: +cmd
-				//     ;; Got answer:
-				//     ;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 51502
-				//     ;; flags: qr; QUERY: 1, ANSWER: 0, AUTHORITY: 2, ADDITIONAL: 1
-				//
-				//     ;; OPT PSEUDOSECTION:
-				//     ; EDNS: version: 0, flags:; udp: 1452
-				//     ; COOKIE: 12e4cbd55f475a5d7e2cdf3e61e9684a60a0f37bf9d563d4 (good)
-				//     ;; QUESTION SECTION:
-				//     ;cmcdn.de.                      IN      NS
-				//
-				//     ;; AUTHORITY SECTION:
-				//     cmcdn.de.               86400   IN      NS      kara.ns.cloudflare.com.
-				//     cmcdn.de.               86400   IN      NS      jay.ns.cloudflare.com.
-				//
-				//     ;; Query time: 53 msec
-				//     ;; SERVER: 194.0.0.53#53(194.0.0.53)
-				//     ;; WHEN: Thu Jan 20 14:48:58 CET 2022
-				//     ;; MSG SIZE  rcvd: 119
-				//
-				// We _could_ just keep going, in which case net.Dial would
-				// implicitly use the system resolver to lookup the name
-				// servers, but the whole point of this library is to be
-				// predictable with regards to caching.
+		ip := net.ParseIP(host)
+		if ip == nil {
+			result.Error = fmt.Errorf("not an ip address: %s", host)
+			trace.add(result, rr)
+			continue
+		}
+
+		if ip.To4() != nil {
+			if r.ip4disabled {
+				result.Error = errors.New("IPv4 disabled")
+				trace.add(result, rr)
 				continue
 			}
+		} else if r.ip6disabled {
+			result.Error = errors.New("IPv6 disabled")
+			trace.add(result, rr)
+			continue
 		}
 
 		result.ServerAddr = addr
@@ -461,6 +442,55 @@ func (r *Resolver) doQuery(ctx context.Context, q dns.Question, nsSet nsSet, tra
 	result.Error = errors.New("no supported name servers available")
 
 	return result
+}
+
+func (r *Resolver) serverAddrFromRR(ctx context.Context, rr dns.RR, trace *Trace) (string, error) {
+	switch rr := rr.(type) {
+	case *dns.A:
+		return net.JoinHostPort(rr.A.String(), r.defaultPort), nil
+	case *dns.AAAA:
+		return net.JoinHostPort(rr.AAAA.String(), r.defaultPort), nil
+	case *dns.SRV:
+		// From explicitly configured OS servers. We use them to discover
+		// the root name servers, so while DNS allows rr.Target to be a
+		// domain name, we have to require IP addresses here.
+		//
+		// This should have been validated by SetSystemServers, so we can panic.
+		if net.ParseIP(rr.Target) == nil {
+			panic("not an ip address: " + rr.Target)
+		}
+		return net.JoinHostPort(rr.Target, strconv.Itoa(int(rr.Port))), nil
+	case *dns.NS:
+		// From a prior NS query without AUTHORITY or suitable ADDITIONAL
+		// section in the response. Example:
+		//
+		//     ; <<>> DiG 9.16.24-RH <<>> NS cmcdn.de. @a.nic.de. +norecurse
+		//     ;; global options: +cmd
+		//     ;; Got answer:
+		//     ;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 51502
+		//     ;; flags: qr; QUERY: 1, ANSWER: 0, AUTHORITY: 2, ADDITIONAL: 1
+		//
+		//     ;; OPT PSEUDOSECTION:
+		//     ; EDNS: version: 0, flags:; udp: 1452
+		//     ; COOKIE: 12e4cbd55f475a5d7e2cdf3e61e9684a60a0f37bf9d563d4 (good)
+		//     ;; QUESTION SECTION:
+		//     ;cmcdn.de.                      IN      NS
+		//
+		//     ;; AUTHORITY SECTION:
+		//     cmcdn.de.               86400   IN      NS      kara.ns.cloudflare.com.
+		//     cmcdn.de.               86400   IN      NS      jay.ns.cloudflare.com.
+		//
+		//     ;; Query time: 53 msec
+		//     ;; SERVER: 194.0.0.53#53(194.0.0.53)
+		//     ;; WHEN: Thu Jan 20 14:48:58 CET 2022
+		//     ;; MSG SIZE  rcvd: 119
+		//
+		// TODO: start a new query tree to resolve rr.Ns
+
+		return net.JoinHostPort(rr.Ns, r.defaultPort), nil
+	default:
+		panic(fmt.Sprintf("unexpected record type: %T", rr))
+	}
 }
 
 func ensurePort(addr, defaultPort string) string {

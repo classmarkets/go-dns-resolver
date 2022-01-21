@@ -29,27 +29,29 @@ func (t *Trace) add(result QueryResult, prev dns.RR) {
 		RTT:      result.RTT,
 	}
 
-	if result.Response != nil {
-		all := result.Response.Answer
-		all = append(all, result.Response.Ns...)
-		all = append(all, result.Response.Extra...)
-
-		for _, rr := range all {
-			answer := &TraceAnswer{
-				Record: rr,
-			}
-			if t.idx == nil {
-				t.idx = map[dns.RR]*TraceAnswer{}
-			}
-			n.Answers = append(n.Answers, answer)
-			t.idx[rr] = answer
-		}
-	}
-
 	if parent := t.idx[prev]; parent != nil {
-		parent.Next = n
+		parent.Next = append(parent.Next, n)
 	} else {
 		t.Queries = append(t.Queries, n)
+	}
+
+	if result.Response == nil {
+		return
+	}
+
+	all := result.Response.Answer
+	all = append(all, result.Response.Ns...)
+	all = append(all, result.Response.Extra...)
+
+	for _, rr := range all {
+		answer := &TraceAnswer{
+			Record: rr,
+		}
+		if t.idx == nil {
+			t.idx = map[dns.RR]*TraceAnswer{}
+		}
+		n.Answers = append(n.Answers, answer)
+		t.idx[rr] = answer
 	}
 }
 
@@ -79,7 +81,7 @@ type TraceAnswer struct {
 	// Next is the DNS query that has been made following this answer. For
 	// instance, if this answer is in response to some NS query, the next query
 	// may be for an A record set, directed at the server mentioned in Record.
-	Next *TraceNode
+	Next []*TraceNode
 }
 
 type TraceNode struct {
@@ -108,7 +110,9 @@ func (n *TraceNode) dump(w io.Writer, depth int) {
 			io.WriteString(w, strings.Repeat(" ", depth*4))
 			fmt.Fprintf(w, "  ! %v\n", n.fmt(a.Record))
 
-			a.Next.dump(w, depth+1)
+			for _, n := range a.Next {
+				n.dump(w, depth+1)
+			}
 		}
 	}
 }

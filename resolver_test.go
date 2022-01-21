@@ -69,8 +69,11 @@ func TestResolver_SetSystemServers_AddressNormalization(t *testing.T) {
 
 func TestResolver_DiscoverRootServers(t *testing.T) {
 	r := New()
+	r.ip6disabled = true
 	r.LogFunc = DebugLog(t)
-	_, err := r.Query(context.Background(), "A", "google.com")
+	//rs, err := r.Query(context.Background(), "A", "google.com")
+	rs, err := r.Query(context.Background(), "A", "cmcdn.de")
+	t.Logf("Trace:\n" + rs.Trace.Dump())
 	assert.NoError(t, err)
 }
 
