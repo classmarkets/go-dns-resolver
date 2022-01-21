@@ -99,21 +99,19 @@ func TestResolver_Query_SimpleARecord(t *testing.T) {
 	assert.Equal(t, rs.Age, -1*time.Second)
 	assert.Greater(t, rs.RTT, time.Duration(0))
 
-	return
-
 	wantTrace := strings.TrimSpace(`
 ? . IN NS @127.0.0.250:5354 0ms
   ! . 321 IN NS self.test.
   ! self.test. 321 IN A 127.0.0.250
-	? com. IN NS @127.0.0.200:5354 0ms
-	  ! com. 321 IN NS gtld-server.net.test.
-	  ! gtld-server.net.test. 321 IN A 127.0.0.100
-		? example.com. IN NS @127.0.0.100:5354 0ms
-		  ! example.com. 321 IN NS 0.iana-server.net.test.
-		  ! 0.iana-server.net.test. 321 IN A 127.0.0.101
-			? example.com. IN A @127.0.0.101:5354 0ms
-			  ! example.com. 321 IN A 192.0.2.0
-	`)
+    ? com. IN NS @127.0.0.250:5354 0ms
+      ! com. 321 IN NS gtld-server.net.test.
+      ! gtld-server.net.test. 321 IN A 127.0.0.100
+        ? example.com. IN NS @127.0.0.100:5354 0ms
+          ! example.com. 321 IN NS 0.iana-server.net.test.
+          ! 0.iana-server.net.test. 321 IN A 127.0.0.101
+            ? example.com. IN A @127.0.0.101:5354 0ms
+              ! example.com. 321 IN A 192.0.2.0
+	`) + "\n"
 
 	assert.Equal(t, wantTrace, rs.Trace.Dump())
 }

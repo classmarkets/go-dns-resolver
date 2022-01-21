@@ -1,7 +1,6 @@
 package dnsresolver
 
 import (
-	"log"
 	"net"
 
 	"github.com/miekg/dns"
@@ -9,23 +8,42 @@ import (
 
 type nsSet interface {
 	Err() error
-	Addrs() []string
+	Addrs() []dns.RR
 }
 
 type hardCodedNSSet []string
 
 var _ nsSet = (hardCodedNSSet)(nil)
 
-func (set hardCodedNSSet) Err() error      { return nil }
-func (set hardCodedNSSet) Addrs() []string { return set }
+func (set hardCodedNSSet) Err() error { return nil }
+func (set hardCodedNSSet) Addrs() []dns.RR {
+	var rrs []dns.RR
+	for _, addr := range set {
+		// TODO dns.SRV
+		if rr := ipRR(net.ParseIP(addr)); rr != nil {
+			rrs = append(rrs, rr)
+		}
+	}
+	return rrs
+}
+
+func ipRR(ip net.IP) dns.RR {
+	if ip.To4() != nil {
+		return &dns.A{A: ip}
+	} else if ip.To16() != nil {
+		return &dns.AAAA{AAAA: ip}
+	} else {
+		return nil
+	}
+}
 
 type nsResponseSet QueryResult
 
 var _ nsSet = nsResponseSet{}
 
 func (set nsResponseSet) Err() error { return set.Error }
-func (set nsResponseSet) Addrs() []string {
-	var ips []string
+func (set nsResponseSet) Addrs() []dns.RR {
+	var rrs []dns.RR
 
 	for _, rr := range append(set.Response.Answer, set.Response.Ns...) {
 		ns, ok := rr.(*dns.NS)
@@ -34,38 +52,37 @@ func (set nsResponseSet) Addrs() []string {
 		}
 
 		value := ns.Ns
-		log.Println(value, net.ParseIP(value))
 		if net.ParseIP(value) != nil {
-			ips = append(ips, value)
+			rrs = append(rrs, ns)
 			continue
 		}
 
-		ips = append(ips, set.tryMapIPs(value)...)
+		rrs = append(rrs, set.tryMapIPs(ns)...)
 	}
 
-	return ips // TODO: de-dup
+	return rrs // TODO: de-dup
 }
 
 // tryMapIPs maps domain names to IP addresses using the ADDITIONAL section of
 // the NS response. If no mapping exists, name is returned as-is.
-func (set nsResponseSet) tryMapIPs(name string) []string {
-	var ips []string
+func (set nsResponseSet) tryMapIPs(ns *dns.NS) []dns.RR {
+	var rrs []dns.RR
 	for _, rr := range set.Response.Extra {
-		if rr.Header().Name != name {
+		if rr.Header().Name != ns.Ns {
 			continue
 		}
 
 		switch rr := rr.(type) {
 		case *dns.A:
-			ips = append(ips, rr.A.String())
+			rrs = append(rrs, rr)
 		case *dns.AAAA:
-			ips = append(ips, rr.AAAA.String())
+			rrs = append(rrs, rr)
 		}
 	}
 
-	if len(ips) == 0 {
-		return []string{name}
+	if len(rrs) == 0 {
+		return []dns.RR{ns}
 	}
 
-	return ips
+	return rrs
 }

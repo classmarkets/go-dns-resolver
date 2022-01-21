@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"net"
 	"strings"
 	"sync"
@@ -275,8 +274,8 @@ func (r *Resolver) Query(ctx context.Context, recordType string, domainName stri
 		Qclass: dns.ClassINET,
 	}
 
-	nsSet := r.locateResolverFor(ctx, dns.CanonicalName(domainName))
-	result := r.doQuery(ctx, q, nsSet)
+	nsSet := r.locateResolverFor(ctx, dns.CanonicalName(domainName), rs.Trace)
+	result := r.doQuery(ctx, q, nsSet, rs.Trace)
 
 	rs.RTT = result.RTT
 	rs.NameServerAddress = result.ServerAddr
@@ -332,12 +331,12 @@ func (r *Resolver) Query(ctx context.Context, recordType string, domainName stri
 }
 
 // locateResolverFor returns the set of authoritative name servers for canonicalDomainName.
-func (r *Resolver) locateResolverFor(ctx context.Context, canonicalDomainName string) nsSet {
+func (r *Resolver) locateResolverFor(ctx context.Context, canonicalDomainName string, trace *Trace) nsSet {
 	var nsSet nsSet
 	if canonicalDomainName == "." {
 		nsSet = r.discoverSystemServers()
 	} else {
-		nsSet = r.locateResolverFor(ctx, parentDomain(canonicalDomainName))
+		nsSet = r.locateResolverFor(ctx, parentDomain(canonicalDomainName), trace)
 	}
 
 	q := dns.Question{
@@ -346,7 +345,7 @@ func (r *Resolver) locateResolverFor(ctx context.Context, canonicalDomainName st
 		Qclass: dns.ClassINET,
 	}
 
-	result := r.doQuery(ctx, q, nsSet)
+	result := r.doQuery(ctx, q, nsSet, trace)
 
 	return nsResponseSet(result)
 }
@@ -360,17 +359,17 @@ func parentDomain(canonicalDomainName string) string {
 	}
 }
 
-type QueryResult struct {
-	Question   dns.Question
+type QueryResult struct { // TODO: unexport
+	Question   *dns.Question
 	ServerAddr string
 	RTT        time.Duration
 	Response   *dns.Msg
 	Error      error
 }
 
-func (r *Resolver) doQuery(ctx context.Context, q dns.Question, nsSet nsSet) QueryResult {
+func (r *Resolver) doQuery(ctx context.Context, q dns.Question, nsSet nsSet, trace *Trace) QueryResult {
 	result := QueryResult{
-		Question: q,
+		Question: &q,
 	}
 
 	if err := nsSet.Err(); err != nil {
@@ -380,10 +379,9 @@ func (r *Resolver) doQuery(ctx context.Context, q dns.Question, nsSet nsSet) Que
 	}
 
 	addrs := nsSet.Addrs()
-	log.Printf("Trying name servers: q=%s, addrs=%v\n", q.String(), addrs)
-	for _, addr := range addrs {
+	for _, rr := range addrs {
+		addr := rrValue(rr)
 		addr = ensurePort(addr, r.defaultPort)
-		log.Printf("Trying name servers: q=%s, addr=%v\n", q.String(), addr)
 
 		{
 			ip, _, err := net.SplitHostPort(addr)
@@ -405,8 +403,31 @@ func (r *Resolver) doQuery(ctx context.Context, q dns.Question, nsSet nsSet) Que
 				// server) we would have to start a new query chain to resolve
 				// those names before moving on.
 				//
-				// This can potentially introduce loops, and we have never seen
-				// this happen in the wild, so this isn't supported here.
+				// This can potentially introduce loops, so we have to be
+				// careful once we takle this.
+				//
+				// Example:
+				//
+				//     ; <<>> DiG 9.16.24-RH <<>> NS cmcdn.de. @a.nic.de. +norecurse
+				//     ;; global options: +cmd
+				//     ;; Got answer:
+				//     ;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 51502
+				//     ;; flags: qr; QUERY: 1, ANSWER: 0, AUTHORITY: 2, ADDITIONAL: 1
+				//
+				//     ;; OPT PSEUDOSECTION:
+				//     ; EDNS: version: 0, flags:; udp: 1452
+				//     ; COOKIE: 12e4cbd55f475a5d7e2cdf3e61e9684a60a0f37bf9d563d4 (good)
+				//     ;; QUESTION SECTION:
+				//     ;cmcdn.de.                      IN      NS
+				//
+				//     ;; AUTHORITY SECTION:
+				//     cmcdn.de.               86400   IN      NS      kara.ns.cloudflare.com.
+				//     cmcdn.de.               86400   IN      NS      jay.ns.cloudflare.com.
+				//
+				//     ;; Query time: 53 msec
+				//     ;; SERVER: 194.0.0.53#53(194.0.0.53)
+				//     ;; WHEN: Thu Jan 20 14:48:58 CET 2022
+				//     ;; MSG SIZE  rcvd: 119
 				//
 				// We _could_ just keep going, in which case net.Dial would
 				// implicitly use the system resolver to lookup the name
@@ -425,12 +446,11 @@ func (r *Resolver) doQuery(ctx context.Context, q dns.Question, nsSet nsSet) Que
 		m.RecursionDesired = q.Qtype == dns.TypeNS && q.Name == "."
 
 		result.Response, result.RTT, result.Error = c.ExchangeContext(ctx, m, addr)
-		r.trace(result)
+		trace.add(result, rr)
 		if r.LogFunc != nil {
 			r.LogFunc(result)
 		}
 
-		log.Println(result.Error)
 		if result.Error != nil {
 			continue
 		}
@@ -441,10 +461,6 @@ func (r *Resolver) doQuery(ctx context.Context, q dns.Question, nsSet nsSet) Que
 	result.Error = errors.New("no supported name servers available")
 
 	return result
-}
-
-func (r *Resolver) trace(result QueryResult) {
-	// TODO
 }
 
 func ensurePort(addr, defaultPort string) string {

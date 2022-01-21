@@ -18,6 +18,39 @@ import (
 // servers.
 type Trace struct {
 	Queries []*TraceNode
+	idx     map[dns.RR]*TraceAnswer
+}
+
+func (t *Trace) add(result QueryResult, prev dns.RR) {
+	n := &TraceNode{
+		Question: result.Question,
+		Server:   result.ServerAddr,
+		Err:      result.Error,
+		RTT:      result.RTT,
+	}
+
+	if result.Response != nil {
+		all := result.Response.Answer
+		all = append(all, result.Response.Ns...)
+		all = append(all, result.Response.Extra...)
+
+		for _, rr := range all {
+			answer := &TraceAnswer{
+				Record: rr,
+			}
+			if t.idx == nil {
+				t.idx = map[dns.RR]*TraceAnswer{}
+			}
+			n.Answers = append(n.Answers, answer)
+			t.idx[rr] = answer
+		}
+	}
+
+	if parent := t.idx[prev]; parent != nil {
+		parent.Next = n
+	} else {
+		t.Queries = append(t.Queries, n)
+	}
 }
 
 // Dump returns a string representation of the trace.
@@ -49,12 +82,6 @@ type TraceAnswer struct {
 	Next *TraceNode
 }
 
-func (a *TraceAnswer) SetNext(node *TraceNode) {
-	if a != nil {
-		a.Next = node
-	}
-}
-
 type TraceNode struct {
 	Question *dns.Question
 	Server   string
@@ -65,28 +92,22 @@ type TraceNode struct {
 	RTT time.Duration
 }
 
-func (n *TraceNode) addAnswer(record dns.RR) {
-	n.Answers = append(n.Answers, &TraceAnswer{
-		Record: record,
-	})
-}
-
-func (n *TraceNode) findAnswer(value string, types ...string) *TraceAnswer {
-	return nil // TODO
-}
-
 func (n *TraceNode) dump(w io.Writer, depth int) {
 	if n == nil {
 		return
 	}
+
 	io.WriteString(w, strings.Repeat(" ", depth*4))
 	fmt.Fprintf(w, "? %s @%s %vms\n", n.fmt(n.Question), n.Server, n.RTT.Milliseconds())
-	io.WriteString(w, strings.Repeat(" ", depth*4))
+
 	if n.Err != nil {
-		fmt.Fprintf(w, "  X %v", n.Err)
+		io.WriteString(w, strings.Repeat(" ", depth*4))
+		fmt.Fprintf(w, "  X %v\n", n.Err)
 	} else {
 		for _, a := range n.Answers {
+			io.WriteString(w, strings.Repeat(" ", depth*4))
 			fmt.Fprintf(w, "  ! %v\n", n.fmt(a.Record))
+
 			a.Next.dump(w, depth+1)
 		}
 	}
