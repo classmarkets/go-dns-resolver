@@ -36,11 +36,14 @@ type Resolver struct {
 	// records are evicted if necessary.
 	CachePolicy CachePolicy
 
-	LogFunc func(QueryResult)
+	logFunc func(queryResult)
 
 	// defaultPort is added to things like NS results. This should be "53" for
 	// the real world and "5354" in tests.
 	defaultPort string
+
+	ip4disabled bool
+	ip6disabled bool
 
 	// mu protects zoneServers and cache.
 	//
@@ -278,57 +281,9 @@ func (r *Resolver) Query(ctx context.Context, recordType string, domainName stri
 	nsSet := r.locateResolverFor(ctx, dns.CanonicalName(domainName), rs.Trace)
 	result := r.doQuery(ctx, q, nsSet, rs.Trace)
 
-	rs.RTT = result.RTT
-	rs.NameServerAddress = result.ServerAddr
+	err := rs.fromResult(result)
 
-	err := result.Error
-	if err != nil {
-		return rs, LookupError{
-			RecordType: rs.Type,
-			DomainName: rs.Name,
-			Message:    "all name servers failed; last error",
-			Cause:      err,
-		}
-	}
-
-	resp := result.Response
-	if resp.Rcode != dns.RcodeSuccess {
-		return rs, ErrorReponse{
-			RecordType: rs.Type,
-			DomainName: rs.Name,
-			Code:       resp.Rcode,
-		}
-	}
-
-	first := true
-	for _, rr := range resp.Answer {
-		hdr := rr.Header()
-		if hdr.Name != q.Name {
-			continue
-		}
-		if hdr.Rrtype != q.Qtype {
-			continue
-		}
-		ttl := time.Duration(hdr.Ttl) * time.Second
-		if first || ttl < rs.TTL {
-			rs.TTL = ttl
-		}
-		first = false
-
-		rs.Values = append(rs.Values, rrValue(rr))
-	}
-
-	rs.additional = nil
-	for _, rr := range resp.Extra {
-		hdr := rr.Header()
-		rs.additional = append(rs.additional, [...]string{
-			hdr.Name,
-			dns.TypeToString[hdr.Rrtype],
-			rrValue(rr),
-		})
-	}
-
-	return rs, nil
+	return rs, err
 }
 
 // locateResolverFor returns the set of authoritative name servers for canonicalDomainName.
@@ -360,7 +315,7 @@ func parentDomain(canonicalDomainName string) string {
 	}
 }
 
-type QueryResult struct { // TODO: unexport
+type queryResult struct {
 	Question   *dns.Question
 	ServerAddr string
 	RTT        time.Duration
@@ -368,8 +323,8 @@ type QueryResult struct { // TODO: unexport
 	Error      error
 }
 
-func (r *Resolver) doQuery(ctx context.Context, q dns.Question, nsSet nsSet, trace *Trace) QueryResult {
-	result := QueryResult{
+func (r *Resolver) doQuery(ctx context.Context, q dns.Question, nsSet nsSet, trace *Trace) queryResult {
+	result := queryResult{
 		Question: &q,
 	}
 
@@ -428,8 +383,8 @@ func (r *Resolver) doQuery(ctx context.Context, q dns.Question, nsSet nsSet, tra
 
 		result.Response, result.RTT, result.Error = c.ExchangeContext(ctx, m, addr)
 		trace.add(result, rr)
-		if r.LogFunc != nil {
-			r.LogFunc(result)
+		if r.logFunc != nil {
+			r.logFunc(result)
 		}
 
 		if result.Error != nil {

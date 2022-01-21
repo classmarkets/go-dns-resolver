@@ -12,6 +12,11 @@ import (
 // for with errors.Is.
 var ErrNXDomain = errors.New("NXDOMAIN response")
 
+// ErrCircular is returned by Resolver.Query if CNAME records or name servers
+// refer to one another. ErrCircular may be wrapped and must be tested for with
+// errors.Is.
+var ErrCircular = errors.New("circular reference")
+
 // LookupError is returned by Resolver.Query if the desired query could not be
 // made, typically due to a network error or timeout.
 type LookupError struct {

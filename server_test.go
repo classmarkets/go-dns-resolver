@@ -1,13 +1,9 @@
 package dnsresolver
 
 import (
-	"bytes"
-	"fmt"
 	"net"
-	"sort"
 	"strings"
 	"testing"
-	"text/tabwriter"
 
 	"github.com/miekg/dns"
 )
@@ -36,27 +32,11 @@ func (ts *TestServer) AddRecordSet(rr dns.RR) {
 //
 // The server is automatically shut down when the test finishes.
 func NewTestServer(t *testing.T, addr string, zone string) *TestServer {
-	srv := &TestServer{}
-
-	zp := dns.NewZoneParser(
-		strings.NewReader(strings.TrimSpace(zone)+"\n"),
-		".",
-		addr+".zone",
-	)
-
-	zp.SetIncludeAllowed(false)
-
-	for {
-		rr, ok := zp.Next()
-		if !ok {
-			break
-		}
-		srv.AddRecordSet(rr)
+	srv := &TestServer{
+		t: t,
 	}
 
-	if err := zp.Err(); err != nil {
-		t.Fatal(err)
-	}
+	srv.parseZone(zone, addr+".zone")
 
 	t.Logf("Starting name server on %s:5354/udp", addr)
 	ln, err := net.ListenPacket("udp", addr+":5354")
@@ -66,7 +46,7 @@ func NewTestServer(t *testing.T, addr string, zone string) *TestServer {
 
 	srv.Server = dns.Server{
 		PacketConn: ln,
-		Handler:    testHandler(t, zone, addr+".zone"),
+		Handler:    srv,
 	}
 
 	expectErr := make(chan struct{})
@@ -110,184 +90,110 @@ self.test.             321  IN  A   `+rootAddr+`
 	`)
 }
 
-type Lab struct {
-	RootServer  *TestServer
-	TLDServer   *TestServer
-	ZoneServers map[string]*TestServer
-}
-
-func DebugLog(t *testing.T) func(QueryResult) {
-	return func(result QueryResult) {
-		q := result.Question
-		resp := result.Response
-		err := result.Error
-
-		t.Logf("%s\t@%s %dms\n", strings.TrimPrefix(q.String(), ";"), result.ServerAddr, result.RTT.Milliseconds())
-		if err != nil {
-			t.Logf("\t%v\n", err)
-		} else if resp.Rcode != dns.RcodeSuccess {
-			t.Logf("\t%s\n", dns.RcodeToString[resp.Rcode])
-		} else {
-			for _, rr := range append(resp.Answer, resp.Extra...) {
-				t.Logf("\t%s\n", rr.String())
-			}
-		}
-	}
-}
-
-// NewLab starts a root name server, a tld name server, the name servers
-// defined by zoneServers, and configured r to use the root server.
-//
-// zones is a map of zone origins to RFC 1035 style zone definitions. The root
-// server listens on 127.0.0.250:5354, the tld server on 127.0.0.100:5354, and
-// the zone servers on consecutive addresses starting at 127.0.0.101:5354.
-//
-// All servers are automatically shut down when the test finishes.
-func NewLab(t *testing.T, r *Resolver, zones map[string]string) *Lab {
-	r.defaultPort = "5354"
-	r.systemServerAddrs = []string{"127.0.0.250"}
-	r.LogFunc = DebugLog(t)
-
-	lab := &Lab{
-		ZoneServers: map[string]*TestServer{},
+func (ts *TestServer) parseZone(zone, fname string) {
+	if ts.DB == nil {
+		ts.DB = map[uint16]map[string][]dns.RR{}
 	}
 
-	var zoneNames []string
-
-	for zoneName := range zones {
-		zoneNames = append(zoneNames, zoneName)
+	lines := strings.Split(zone, "\n")
+	for i := range lines {
+		lines[i] = strings.TrimSpace(lines[i])
 	}
-	sort.Strings(zoneNames)
+	zone = strings.Join(lines, "\n")
 
-	buf := &bytes.Buffer{}
-	tw := tabwriter.NewWriter(buf, 0, 0, 2, ' ', 0)
-
-	for i, zoneName := range zoneNames {
-		addr := net.IP{127, 0, 0, byte(101 + i)}.String()
-		fmt.Fprintf(tw, "%-s\t321\tIN\tNS\t%d.iana-server.net.test.\n", dns.CanonicalName(zoneName), i)
-		fmt.Fprintf(tw, "%d.iana-server.net.test.\t321\tIN\tA\t%s\n", i, addr)
-
-		lab.ZoneServers[zoneName] = NewTestServer(t, addr,
-			fmt.Sprintf("$ORIGIN %s\n%s", dns.CanonicalName(zoneName), strings.TrimSpace(zones[zoneName])),
-		)
-	}
-
-	tw.Flush()
-
-	lab.TLDServer = NewTestServer(t, "127.0.0.100", buf.String())
-	lab.RootServer = NewRootServer(t, "127.0.0.250", "127.0.0.100")
-
-	t.Log("TLD zonefile:\n" + buf.String())
-
-	return lab
-}
-
-func testHandler(t *testing.T, zone, fname string) dns.Handler {
-	zp := dns.NewZoneParser(
-		strings.NewReader(strings.TrimSpace(zone)+"\n"),
-		".", fname)
+	zp := dns.NewZoneParser(strings.NewReader(zone+"\n"), ".", fname)
 
 	zp.SetIncludeAllowed(false)
-
-	db := map[uint16]map[string][]dns.RR{}
 
 	for {
 		rr, ok := zp.Next()
 		if !ok {
 			break
 		}
-		hdr := rr.Header()
-
-		if db[hdr.Rrtype] == nil {
-			db[hdr.Rrtype] = map[string][]dns.RR{}
-		}
-		db[hdr.Rrtype][hdr.Name] = append(db[hdr.Rrtype][hdr.Name], rr)
+		ts.AddRecordSet(rr)
 	}
 
 	if err := zp.Err(); err != nil {
-		t.Fatal(err)
+		ts.t.Fatal(err)
+	}
+}
+
+func (ts *TestServer) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
+	errCode := func(w dns.ResponseWriter, r *dns.Msg, code int) {
+		m := new(dns.Msg)
+		m.SetRcode(r, code)
+		w.WriteMsg(m)
 	}
 
-	/*
-		ns := new(dns.NS)
-		ns.Hdr.Name = "example.com."
-		ns.Hdr.Rrtype = dns.TypeNS
-		ns.Hdr.Class = dns.ClassINET
-		ns.Ns = "self."
-		ns.Hdr.Ttl = 300
+	nxDomain := func(w dns.ResponseWriter, r *dns.Msg) {
+		errCode(w, r, dns.RcodeNameError)
+	}
 
-		a := new(dns.A)
-		a.Hdr.Name = "self."
-		a.Hdr.Rrtype = dns.TypeA
-		a.Hdr.Class = dns.ClassINET
-		a.Hdr.Ttl = 60
-		a.A = net.ParseIP("127.0.0.100")
+	switch r.Opcode {
+	case dns.OpcodeQuery:
+	default:
+		ts.t.Logf("opcode %v is not supported", r.Opcode)
+		errCode(w, r, dns.RcodeNotImplemented)
+		return
+	}
 
-		db := map[uint16]map[string][]dns.RR{}
-		db[dns.TypeA] = map[string][]dns.RR{}
-		db[dns.TypeNS] = map[string][]dns.RR{}
-		db[dns.TypeNS]["example.com."] = append(db[dns.TypeNS]["example.com."], ns)
+	if len(r.Question) == 0 {
+		ts.t.Logf("no question")
+		errCode(w, r, dns.RcodeFormatError)
+		return
+	}
 
-		db[dns.TypeA]["self."] = append(db[dns.TypeA]["example.com."], a)
-	*/
+	if len(r.Question) > 1 {
+		ts.t.Logf("multiple questions are not supported")
+		errCode(w, r, dns.RcodeNotImplemented)
+		return
+	}
 
-	return dns.HandlerFunc(func(w dns.ResponseWriter, r *dns.Msg) {
+	m := new(dns.Msg)
+	m.SetRcode(r, dns.RcodeSuccess)
+	m.Authoritative = true
+	ts.addAnswer(m, m.Question[0].Qtype, m.Question[0].Name, &m.Answer)
 
-		switch r.Opcode {
-		case dns.OpcodeQuery:
-		default:
-			t.Logf("opcode %v is not supported", r.Opcode)
-			m := new(dns.Msg)
-			m.SetRcode(r, dns.RcodeNotImplemented)
-			w.WriteMsg(m)
-			return
-		}
+	if len(m.Answer)+len(m.Ns)+len(m.Extra) == 0 {
+		nxDomain(w, r)
+		return
+	}
 
-		if len(r.Question) == 0 {
-			t.Logf("no question")
-			m := new(dns.Msg)
-			m.SetRcode(r, dns.RcodeFormatError)
-			w.WriteMsg(m)
-			return
-		}
+	switch m.Question[0].Qtype {
+	case dns.TypeNS:
+		for _, rr := range m.Answer {
+			var additionalIPName string
 
-		if len(r.Question) > 1 {
-			t.Logf("multiple questions are not supported")
-			m := new(dns.Msg)
-			m.SetRcode(r, dns.RcodeNotImplemented)
-			w.WriteMsg(m)
-			return
-		}
+			switch rr := rr.(type) {
+			case *dns.NS:
+				additionalIPName = rr.Ns
+			}
 
-		m := new(dns.Msg)
-		m.SetRcode(r, dns.RcodeSuccess)
-		m.Authoritative = true
-		m.Answer = db[m.Question[0].Qtype][m.Question[0].Name]
-
-		if len(m.Answer) == 0 {
-			m := new(dns.Msg)
-			m.SetRcode(r, dns.RcodeNameError)
-			w.WriteMsg(m)
-			return
-		}
-
-		switch m.Question[0].Qtype {
-		case dns.TypeNS:
-			for _, rr := range m.Answer {
-				var additionalIPName string
-
-				switch rr := rr.(type) {
-				case *dns.NS:
-					additionalIPName = rr.Ns
-				}
-
-				if additionalIPName != "" {
-					m.Extra = append(m.Extra, db[dns.TypeA][additionalIPName]...)
-					m.Extra = append(m.Extra, db[dns.TypeAAAA][additionalIPName]...)
-				}
+			if additionalIPName != "" {
+				m.Extra = append(m.Extra, ts.DB[dns.TypeA][additionalIPName]...)
+				m.Extra = append(m.Extra, ts.DB[dns.TypeAAAA][additionalIPName]...)
 			}
 		}
+	}
 
-		w.WriteMsg(m)
-	})
+	w.WriteMsg(m)
+}
+
+func (ts *TestServer) addAnswer(m *dns.Msg, typ uint16, name string, dest *[]dns.RR) {
+	rrs := ts.DB[typ][name]
+	*dest = append(*dest, rrs...)
+
+	if len(rrs) > 0 {
+		return
+	}
+	if typ == dns.TypeCNAME {
+		return
+	}
+
+	cnames := ts.DB[dns.TypeCNAME][name]
+
+	*dest = append(*dest, cnames...)
+	for _, cname := range cnames {
+		ts.addAnswer(m, typ, cname.(*dns.CNAME).Target, dest)
+	}
 }

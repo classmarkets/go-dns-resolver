@@ -37,7 +37,7 @@ func ipRR(ip net.IP) dns.RR {
 	}
 }
 
-type nsResponseSet QueryResult
+type nsResponseSet queryResult
 
 var _ nsSet = nsResponseSet{}
 

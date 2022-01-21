@@ -21,7 +21,7 @@ type Trace struct {
 	idx     map[dns.RR]*TraceAnswer
 }
 
-func (t *Trace) add(result QueryResult, prev dns.RR) {
+func (t *Trace) add(result queryResult, prev dns.RR) {
 	n := &TraceNode{
 		Question: result.Question,
 		Server:   result.ServerAddr,

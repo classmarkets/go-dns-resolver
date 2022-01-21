@@ -1,8 +1,6 @@
 package dnsresolver
 
 import (
-	"net"
-	"strings"
 	"time"
 
 	"github.com/miekg/dns"
@@ -36,8 +34,6 @@ type RecordSet struct {
 	// record sets.
 	Values []string
 
-	additional [][3]string // name, type, value; wire-format
-
 	// NameServerAddress contains the IP address and port of the name server
 	// that has returned this record set.
 	//
@@ -67,41 +63,123 @@ type RecordSet struct {
 
 	// Trace reports all DNS queries that where necessary to retrieve this
 	// RecordSet.
-	Trace     *Trace
-	traceNode *TraceNode
-
-	// TODO: Authoritative bool?
-	// TODO: FromCache bool?
+	Trace *Trace
 }
 
-func (rs *RecordSet) findAdditionalIPRecords(name string) []string {
-	var ips []string
+func (rs *RecordSet) fromResult(result queryResult) error {
+	rs.RTT = result.RTT
+	rs.NameServerAddress = result.ServerAddr
 
-	for _, r := range rs.additional {
-		if dns.CanonicalName(r[1]) != "A" && r[1] != "AAAA" {
-			continue
+	err := result.Error
+	if err != nil {
+		return LookupError{
+			RecordType: rs.Type,
+			DomainName: rs.Name,
+			Message:    "all name servers failed; last error",
+			Cause:      err,
 		}
-		if dns.CanonicalName(r[0]) != dns.CanonicalName(name) {
-			continue
-		}
-		if net.ParseIP(r[2]) == nil {
-			continue
-		}
-
-		ips = append(ips, r[1])
 	}
 
-	return ips
+	resp := result.Response
+	if resp.Rcode != dns.RcodeSuccess {
+		return ErrorReponse{
+			RecordType: rs.Type,
+			DomainName: rs.Name,
+			Code:       resp.Rcode,
+		}
+	}
+
+	type valueSet struct {
+		values []string
+		ttl    time.Duration
+	}
+
+	idx := indexResponse(resp)
+
+	q := result.Question
+
+	set, err := idx.search(q.Name, q.Qtype, nil, nil)
+	if err != nil {
+		return err
+	}
+
+	rs.Values = set.values
+	rs.TTL = set.ttl
+
+	return nil
 }
 
-func newRecordSet(typ, name string, trace *Trace) *RecordSet {
-	if name != "." {
-		name = strings.TrimSuffix(name, ".")
+type valueSet struct {
+	values []string
+	ttl    time.Duration
+}
+
+type recordIndex map[string]map[uint16]*valueSet
+
+func indexResponse(resp *dns.Msg) recordIndex {
+	idx := map[string]map[uint16]*valueSet{}
+
+	for _, rr := range append(resp.Answer, resp.Extra...) {
+		hdr := rr.Header()
+		if idx[hdr.Name] == nil {
+			idx[hdr.Name] = map[uint16]*valueSet{}
+		}
+		ttl := time.Duration(hdr.Ttl) * time.Second
+		s := idx[hdr.Name][hdr.Rrtype]
+		if s == nil {
+			s = &valueSet{
+				ttl: ttl,
+			}
+			idx[hdr.Name][hdr.Rrtype] = s
+		} else if ttl < s.ttl {
+			s.ttl = ttl
+		}
+
+		s.values = append(s.values, rrValue(rr))
 	}
-	return &RecordSet{
-		Name:  name,
-		Type:  typ,
-		Age:   -1 * time.Second,
-		Trace: trace,
+
+	return idx
+}
+
+func (idx recordIndex) search(name string, typ uint16, ttl *time.Duration, seen map[string]bool) (*valueSet, error) {
+	if seen == nil {
+		seen = map[string]bool{}
+	} else if seen[name] {
+		return nil, ErrCircular
+	} else {
+		seen[name] = true
 	}
+
+	if set := idx[name][typ]; set != nil {
+		ttl = idx.minTTL(ttl, set)
+
+		return &valueSet{
+			values: set.values,
+			ttl:    *ttl,
+		}, nil
+	}
+
+	if typ == dns.TypeCNAME {
+		return nil, ErrNXDomain
+	}
+
+	cname := idx[name][dns.TypeCNAME]
+	if cname == nil {
+		return nil, ErrNXDomain
+	}
+
+	ttl = idx.minTTL(ttl, cname)
+
+	return idx.search(cname.values[0], typ, ttl, seen)
+}
+
+func (idx recordIndex) minTTL(ttl *time.Duration, set *valueSet) *time.Duration {
+	if ttl == nil {
+		ttl = new(time.Duration)
+		*ttl = set.ttl
+	} else if set.ttl < *ttl {
+		*ttl = set.ttl
+	}
+
+	return ttl
 }
