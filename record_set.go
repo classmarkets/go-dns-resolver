@@ -1,6 +1,7 @@
 package dnsresolver
 
 import (
+	"strings"
 	"time"
 
 	"github.com/miekg/dns"
@@ -139,6 +140,10 @@ func indexResponse(resp *dns.Msg) recordIndex {
 	}
 
 	return idx
+}
+
+func rrValue(rr dns.RR) string {
+	return strings.TrimPrefix(rr.String(), rr.Header().String())
 }
 
 func (idx recordIndex) search(name string, typ uint16, ttl *time.Duration, seen map[string]bool) (*valueSet, error) {

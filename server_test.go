@@ -1,45 +1,32 @@
 package dnsresolver
 
 import (
+	"fmt"
 	"net"
-	"strings"
 	"testing"
 
 	"github.com/miekg/dns"
 )
 
+type testHandler interface {
+	ServeDNS(*testing.T, dns.ResponseWriter, *dns.Msg)
+}
+
 type TestServer struct {
-	t  *testing.T
-	DB map[uint16]map[string][]dns.RR
 	dns.Server
+
+	t        *testing.T
+	handlers map[string]testHandler
 }
 
-func (ts *TestServer) AddRecordSet(rr dns.RR) {
-	hdr := rr.Header()
-
-	if ts.DB == nil {
-		ts.DB = map[uint16]map[string][]dns.RR{}
-	}
-	if ts.DB[hdr.Rrtype] == nil {
-		ts.DB[hdr.Rrtype] = map[string][]dns.RR{}
-	}
-	ts.DB[hdr.Rrtype][hdr.Name] = append(ts.DB[hdr.Rrtype][hdr.Name], rr)
-}
-
-// NewTestServer returns a DNS server that listens on addr:5354/udp and serves
-// the zone specified by zone, the contents of an RFC 1035 style zonefile.
-// Unless specified with an $ORIGIN directive, the origin is the root zone ".".
-//
-// The server is automatically shut down when the test finishes.
-func NewTestServer(t *testing.T, addr string, zone string) *TestServer {
+func NewTestServer(t *testing.T, addr string) *TestServer {
 	srv := &TestServer{
-		t: t,
+		t:        t,
+		handlers: map[string]testHandler{},
 	}
 
-	srv.parseZone(zone, addr+".zone")
-
-	t.Logf("Starting name server on %s:5354/udp", addr)
-	ln, err := net.ListenPacket("udp", addr+":5354")
+	t.Logf("Starting name server on %s/udp", addr)
+	ln, err := net.ListenPacket("udp", addr)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -49,84 +36,104 @@ func NewTestServer(t *testing.T, addr string, zone string) *TestServer {
 		Handler:    srv,
 	}
 
-	expectErr := make(chan struct{})
-
-	t.Cleanup(func() {
-		close(expectErr)
-		srv.Shutdown()
-	})
-
-	go func() {
-		err := srv.ActivateAndServe()
-		select {
-		case <-expectErr:
-		default:
-			if err != nil {
-				t.Fatal(err)
-			}
-		}
-	}()
+	srv.Start()
 
 	return srv
 }
 
-// NewRootServer returns a DNS server that listens on rootAddr:5354/udp and
-// serves part of the root zone. NS records for the com., net., org., and
-// co.uk. zones are served, and they all point to tldAddr.
-//
-// The server is automatically shut down when the test finishes.
-func NewRootServer(t *testing.T, rootAddr, tldAddr string) *TestServer {
-	return NewTestServer(t, rootAddr, `
-com.                   321  IN  NS  gtld-server.net.test.
-net.                   321  IN  NS  gtld-server.net.test.
-org.                   321  IN  NS  gtld-server.net.test.
-co.uk.                 321  IN  NS  gtld-server.net.test.
-gtld-server.net.test.  321  IN  A   `+tldAddr+`
+func NewRootServer(t *testing.T, addr string, r *Resolver) *TestServer {
+	ip, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		t.Fatal(err)
+	}
 
-; When asked for the root zone return ourselves, so we can use this server in
-; Resolver.systemResolvers.
-.                      321  IN  NS  self.test.
-self.test.             321  IN  A   `+rootAddr+`
-	`)
+	if r != nil {
+		r.systemServerAddrs = []string{ip}
+	}
+
+	srv := NewTestServer(t, addr)
+
+	srv.ExpectQuery("NS .").Respond().
+		Answer(
+			NS(t, ".", 321, "self.test."),
+		).
+		Additional(
+			A(t, "self.test.", 321, ip),
+		)
+
+	return srv
 }
 
-func (ts *TestServer) parseZone(zone, fname string) {
-	if ts.DB == nil {
-		ts.DB = map[uint16]map[string][]dns.RR{}
-	}
+func (ts *TestServer) Start() {
+	expectErr := make(chan struct{})
 
-	lines := strings.Split(zone, "\n")
-	for i := range lines {
-		lines[i] = strings.TrimSpace(lines[i])
-	}
-	zone = strings.Join(lines, "\n")
+	ts.t.Cleanup(func() {
+		close(expectErr)
+		ts.Shutdown()
+	})
 
-	zp := dns.NewZoneParser(strings.NewReader(zone+"\n"), ".", fname)
-
-	zp.SetIncludeAllowed(false)
-
-	for {
-		rr, ok := zp.Next()
-		if !ok {
-			break
+	go func() {
+		err := ts.ActivateAndServe()
+		select {
+		case <-expectErr:
+		default:
+			if err != nil {
+				ts.t.Fatal(err)
+			}
 		}
-		ts.AddRecordSet(rr)
-	}
+	}()
+}
 
-	if err := zp.Err(); err != nil {
+func (ts *TestServer) IP() string {
+	addr := ts.PacketConn.LocalAddr().String()
+	ip, _, err := net.SplitHostPort(addr)
+	if err != nil {
 		ts.t.Fatal(err)
 	}
+	return ip
+}
+
+type expectation struct {
+	testHandler
+}
+
+func (ts *TestServer) ExpectQuery(pattern string) *expectation {
+	h := &expectation{}
+	ts.handlers[pattern] = h
+
+	return h
 }
 
 func (ts *TestServer) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
+	if !ts.validate(w, r) {
+		return
+	}
+
+	q := r.Question[0]
+
+	pattern := fmt.Sprintf("%s %s",
+		dns.TypeToString[q.Qtype], q.Name,
+	)
+
+	h := ts.handlers[pattern]
+	if h == nil {
+		ts.t.Errorf("Unexpected query: %s", pattern)
+
+		m := new(dns.Msg)
+		m.SetRcode(r, dns.RcodeNotImplemented)
+		w.WriteMsg(m)
+
+		return
+	}
+
+	h.ServeDNS(ts.t, w, r)
+}
+
+func (ts *TestServer) validate(w dns.ResponseWriter, r *dns.Msg) bool {
 	errCode := func(w dns.ResponseWriter, r *dns.Msg, code int) {
 		m := new(dns.Msg)
 		m.SetRcode(r, code)
 		w.WriteMsg(m)
-	}
-
-	nxDomain := func(w dns.ResponseWriter, r *dns.Msg) {
-		errCode(w, r, dns.RcodeNameError)
 	}
 
 	switch r.Opcode {
@@ -134,66 +141,117 @@ func (ts *TestServer) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	default:
 		ts.t.Logf("opcode %v is not supported", r.Opcode)
 		errCode(w, r, dns.RcodeNotImplemented)
-		return
+		return false
 	}
 
 	if len(r.Question) == 0 {
 		ts.t.Logf("no question")
 		errCode(w, r, dns.RcodeFormatError)
-		return
+		return false
 	}
 
 	if len(r.Question) > 1 {
 		ts.t.Logf("multiple questions are not supported")
 		errCode(w, r, dns.RcodeNotImplemented)
-		return
+		return false
 	}
 
+	return true
+}
+
+type serveHandler struct {
+	code       int
+	answer     []dns.RR
+	authority  []dns.RR
+	additional []dns.RR
+}
+
+func (h *expectation) Respond() *serveHandler {
+	x := &serveHandler{}
+	h.testHandler = x
+
+	return x
+}
+
+func (h *serveHandler) Status(code int) *serveHandler {
+	h.code = code
+
+	return h
+}
+
+func (h *serveHandler) Answer(rrs ...dns.RR) *serveHandler {
+	h.answer = rrs
+
+	return h
+}
+
+func (h *serveHandler) Authority(rrs ...dns.RR) *serveHandler {
+	h.authority = rrs
+
+	return h
+}
+
+func (h *serveHandler) Additional(rrs ...dns.RR) *serveHandler {
+	h.additional = rrs
+
+	return h
+}
+
+type delegationHandler struct {
+	upstreamAddr string
+	viaAuthority bool
+}
+
+func (h *expectation) DelegateTo(addr string) *delegationHandler {
+	x := &delegationHandler{
+		upstreamAddr: addr,
+	}
+
+	h.testHandler = x
+
+	return x
+}
+
+func (h *delegationHandler) ViaAuthoritySection() *delegationHandler {
+	h.viaAuthority = true
+	return h
+}
+
+func (h *delegationHandler) ServeDNS(t *testing.T, w dns.ResponseWriter, r *dns.Msg) {
 	m := new(dns.Msg)
 	m.SetRcode(r, dns.RcodeSuccess)
-	m.Authoritative = true
-	ts.addAnswer(m, m.Question[0].Qtype, m.Question[0].Name, &m.Answer)
+	m.Authoritative = false
 
-	if len(m.Answer)+len(m.Ns)+len(m.Extra) == 0 {
-		nxDomain(w, r)
-		return
+	if net.ParseIP(h.upstreamAddr) != nil {
+		m.Answer = []dns.RR{
+			NS(t, "com.", 321, "next.test."),
+		}
+		m.Extra = []dns.RR{
+			A(t, "next.test.", 321, h.upstreamAddr),
+		}
+	} else {
+		m.Answer = []dns.RR{
+			NS(t, "com.", 321, h.upstreamAddr),
+		}
 	}
 
-	switch m.Question[0].Qtype {
-	case dns.TypeNS:
-		for _, rr := range m.Answer {
-			var additionalIPName string
-
-			switch rr := rr.(type) {
-			case *dns.NS:
-				additionalIPName = rr.Ns
-			}
-
-			if additionalIPName != "" {
-				m.Extra = append(m.Extra, ts.DB[dns.TypeA][additionalIPName]...)
-				m.Extra = append(m.Extra, ts.DB[dns.TypeAAAA][additionalIPName]...)
-			}
-		}
+	if h.viaAuthority {
+		m.Ns = m.Answer
+		m.Answer = nil
 	}
 
 	w.WriteMsg(m)
 }
 
-func (ts *TestServer) addAnswer(m *dns.Msg, typ uint16, name string, dest *[]dns.RR) {
-	rrs := ts.DB[typ][name]
-	*dest = append(*dest, rrs...)
+func (h *serveHandler) ServeDNS(t *testing.T, w dns.ResponseWriter, r *dns.Msg) {
+	m := new(dns.Msg)
 
-	if len(rrs) > 0 {
-		return
-	}
-	if typ == dns.TypeCNAME {
-		return
-	}
+	m.SetRcode(r, h.code)
+	m.Authoritative = true
 
-	cnames := ts.DB[dns.TypeCNAME][name]
+	m.Answer = h.answer
+	m.Ns = h.authority
+	m.Extra = h.additional
 
-	*dest = append(*dest, cnames...)
-	for _, cname := range cnames {
-		ts.addAnswer(m, typ, cname.(*dns.CNAME).Target, dest)
-	}
+	w.WriteMsg(m)
 }

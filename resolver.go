@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -272,47 +271,39 @@ func (r *Resolver) Query(ctx context.Context, recordType string, domainName stri
 		return rs, fmt.Errorf("unsupported record type: %s", recordType)
 	}
 
+	nsSet := r.discoverSystemServers()
 	q := dns.Question{
+		Name:   ".",
+		Qtype:  dns.TypeNS,
+		Qclass: dns.ClassINET,
+	}
+
+	result := r.doQuery(ctx, q, nsSet, rs.Trace)
+	if result.Error != nil {
+		return rs, fmt.Errorf("discover root name servers: %w", result.Error)
+	}
+	nsSet = nsResponseSet(result)
+
+	q = dns.Question{
 		Name:   dns.CanonicalName(domainName),
 		Qtype:  dns.StringToType[recordType],
 		Qclass: dns.ClassINET,
 	}
 
-	nsSet := r.locateResolverFor(ctx, dns.CanonicalName(domainName), rs.Trace)
-	result := r.doQuery(ctx, q, nsSet, rs.Trace)
+	for {
+		result := r.doQuery(ctx, q, nsSet, rs.Trace)
 
-	err := rs.fromResult(result)
+		if result.isDelegation() {
+			nsSet = nsResponseSet(result)
+			continue
+		}
 
-	return rs, err
-}
+		err := rs.fromResult(result)
 
-// locateResolverFor returns the set of authoritative name servers for canonicalDomainName.
-func (r *Resolver) locateResolverFor(ctx context.Context, canonicalDomainName string, trace *Trace) nsSet {
-	var nsSet nsSet
-	if canonicalDomainName == "." {
-		nsSet = r.discoverSystemServers()
-	} else {
-		nsSet = r.locateResolverFor(ctx, parentDomain(canonicalDomainName), trace)
+		return rs, err
 	}
 
-	q := dns.Question{
-		Name:   canonicalDomainName,
-		Qtype:  dns.TypeNS,
-		Qclass: dns.ClassINET,
-	}
-
-	result := r.doQuery(ctx, q, nsSet, trace)
-
-	return nsResponseSet(result)
-}
-
-func parentDomain(canonicalDomainName string) string {
-	i, end := dns.NextLabel(canonicalDomainName, 0)
-	if end {
-		return "."
-	} else {
-		return canonicalDomainName[i:]
-	}
+	return rs, errors.New("TODO")
 }
 
 type queryResult struct {
@@ -416,6 +407,7 @@ func (r *Resolver) serverAddrFromRR(ctx context.Context, rr dns.RR, trace *Trace
 		}
 		return net.JoinHostPort(rr.Target, strconv.Itoa(int(rr.Port))), nil
 	case *dns.NS:
+		panic("unreachable")
 		// From a prior NS query without AUTHORITY or suitable ADDITIONAL
 		// section in the response. Example:
 		//
@@ -442,21 +434,70 @@ func (r *Resolver) serverAddrFromRR(ctx context.Context, rr dns.RR, trace *Trace
 		//
 		// TODO: start a new query tree to resolve rr.Ns
 
-		return net.JoinHostPort(rr.Ns, r.defaultPort), nil
+		/*XXX
+		q := dns.Question{
+			Name:   rr.Ns,
+			Qtype:  dns.TypeNS,
+			Qclass: dns.ClassINET,
+		}
+
+		// TODO: trace.pushRoot(rr)
+		nsSet := r.locateResolverFor(ctx, rr.Ns, trace)
+		result := r.doQuery(ctx, q, nsSet, trace)
+		// TODO: trace.popRoot()
+
+		rs := RecordSet{}
+		err := rs.fromResult(result)
+		if err != nil {
+			return "", err
+		}
+
+		return net.JoinHostPort(rs.Values[0], r.defaultPort), nil
+		*/
 	default:
 		panic(fmt.Sprintf("unexpected record type: %T", rr))
 	}
 }
 
-func ensurePort(addr, defaultPort string) string {
-	_, _, err := net.SplitHostPort(addr)
-	if err != nil {
-		return net.JoinHostPort(addr, defaultPort)
-	} else {
-		return addr
-	}
-}
+func (r *queryResult) isDelegation() bool {
+	// We consider the response a delegation if
+	//
+	// - the response is not authoritative,
+	// - the union of the ANSWER and AUTHORITY sections is entirely NS records,
+	// - and the ADDITIONAL contains A or AAAA records for at least one of the
+	//   NS records
 
-func rrValue(rr dns.RR) string {
-	return strings.TrimPrefix(rr.String(), rr.Header().String())
+	resp := r.Response
+
+	if resp.Authoritative {
+		return false
+	}
+
+	if (len(resp.Answer)+len(resp.Ns)) == 0 || len(resp.Extra) == 0 {
+		return false
+	}
+
+	names := map[string]bool{}
+	for _, rr := range append(resp.Answer, resp.Ns...) {
+		ns, ok := rr.(*dns.NS)
+		if !ok {
+			return false
+		}
+		names[ns.Ns] = true
+	}
+
+	for _, rr := range resp.Extra {
+		switch rr.(type) {
+		case *dns.A:
+		case *dns.AAAA:
+		default:
+			continue
+		}
+
+		if names[rr.Header().Name] {
+			return true
+		}
+	}
+
+	return false
 }

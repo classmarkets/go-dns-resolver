@@ -68,6 +68,7 @@ func TestResolver_SetSystemServers_AddressNormalization(t *testing.T) {
 }
 
 func TestResolver_DiscoverRootServers(t *testing.T) {
+	return
 	r := New()
 	r.ip6disabled = true
 	r.logFunc = DebugLog(t)
@@ -79,16 +80,75 @@ func TestResolver_DiscoverRootServers(t *testing.T) {
 
 func TestResolver_Query_SimpleARecord(t *testing.T) {
 	r := New()
+	r.defaultPort = "5354"
+	r.logFunc = DebugLog(t)
 
-	NewLab(t, r, map[string]string{
-		"example.com": `
-			@ 321 IN A 192.0.2.0
-			@ 321 IN A 192.0.2.1
-		`,
-	})
+	rootSrv := NewRootServer(t, "127.0.0.250:"+r.defaultPort, r)
+	comSrv := NewTestServer(t, "127.0.0.100:"+r.defaultPort)
+	expSrv := NewTestServer(t, "127.0.0.101:"+r.defaultPort)
+
+	rootSrv.ExpectQuery("A www.example.com.").DelegateTo(comSrv.IP())
+	comSrv.ExpectQuery("A www.example.com.").DelegateTo(expSrv.IP()).ViaAuthoritySection()
+	expSrv.ExpectQuery("A www.example.com.").Respond().
+		Answer(
+			A(t, "www.example.com.", 321, "192.0.2.0"),
+			A(t, "www.example.com.", 321, "192.0.2.1"),
+		)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 	defer cancel()
+
+	rs, err := r.Query(ctx, "A", "www.example.com")
+	t.Logf("Trace:\n" + rs.Trace.Dump())
+	assert.NoError(t, err)
+
+	assert.Equal(t, "www.example.com", rs.Name)
+	assert.Equal(t, "A", rs.Type)
+	assert.Equal(t, 321*time.Second, rs.TTL)
+	assert.Equal(t, []string{"192.0.2.0", "192.0.2.1"}, rs.Values)
+	assert.Equal(t, "127.0.0.101:5354", rs.NameServerAddress)
+	assert.Equal(t, rs.Age, -1*time.Second)
+	assert.Greater(t, rs.RTT, time.Duration(0))
+
+	wantTrace := strings.TrimSpace(`
+? . IN NS @127.0.0.250:5354 0ms
+  ! . 321 IN NS self.test.
+  ! self.test. 321 IN A 127.0.0.250
+    ? www.example.com. IN A @127.0.0.250:5354 0ms
+      ! com. 321 IN NS next.test.
+      ! next.test. 321 IN A 127.0.0.100
+        ? www.example.com. IN A @127.0.0.100:5354 0ms
+          ! com. 321 IN NS next.test.
+          ! next.test. 321 IN A 127.0.0.101
+            ? www.example.com. IN A @127.0.0.101:5354 0ms
+              ! www.example.com. 321 IN A 192.0.2.0
+              ! www.example.com. 321 IN A 192.0.2.1
+	`) + "\n"
+
+	assert.Equal(t, wantTrace, rs.Trace.Dump())
+}
+
+func TestResolver_Query_CNAMEResolution(t *testing.T) {
+	r := New()
+	r.defaultPort = "5354"
+	r.logFunc = DebugLog(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+
+	rootSrv := NewRootServer(t, "127.0.0.250:"+r.defaultPort, r)
+	comSrv := NewTestServer(t, "127.0.0.100:"+r.defaultPort)
+	expSrv := NewTestServer(t, "127.0.0.101:"+r.defaultPort)
+
+	rootSrv.ExpectQuery("A example.com.").DelegateTo(comSrv.IP())
+	comSrv.ExpectQuery("A example.com.").DelegateTo(expSrv.IP())
+	expSrv.ExpectQuery("A example.com.").Respond().
+		Answer(
+			CNAME(t, "example.com.", 321, "www.example.com."),
+		).
+		Additional(
+			A(t, "www.example.com.", 321, "192.0.2.1"),
+		)
 
 	rs, err := r.Query(ctx, "A", "example.com")
 	t.Logf("Trace:\n" + rs.Trace.Dump())
@@ -97,7 +157,56 @@ func TestResolver_Query_SimpleARecord(t *testing.T) {
 	assert.Equal(t, "example.com", rs.Name)
 	assert.Equal(t, "A", rs.Type)
 	assert.Equal(t, 321*time.Second, rs.TTL)
-	assert.Equal(t, []string{"192.0.2.0", "192.0.2.1"}, rs.Values)
+	assert.Equal(t, []string{"192.0.2.1"}, rs.Values)
+	assert.Equal(t, "127.0.0.101:5354", rs.NameServerAddress)
+	assert.Equal(t, rs.Age, -1*time.Second)
+	assert.Greater(t, rs.RTT, time.Duration(0))
+
+	wantTrace := strings.TrimSpace(`
+? . IN NS @127.0.0.250:5354 0ms
+  ! . 321 IN NS self.test.
+  ! self.test. 321 IN A 127.0.0.250
+    ? example.com. IN A @127.0.0.250:5354 0ms
+      ! com. 321 IN NS next.test.
+      ! next.test. 321 IN A 127.0.0.100
+        ? example.com. IN A @127.0.0.100:5354 0ms
+          ! com. 321 IN NS next.test.
+          ! next.test. 321 IN A 127.0.0.101
+            ? example.com. IN A @127.0.0.101:5354 0ms
+              ! example.com. 321 IN CNAME www.example.com.
+              ! www.example.com. 321 IN A 192.0.2.1
+			`) + "\n"
+
+	assert.Equal(t, wantTrace, rs.Trace.Dump())
+}
+
+/*
+func TestResolver_Query_ZoneGap(t *testing.T) {
+	r := New()
+	r.defaultPort = "5354"
+	r.logFunc = DebugLog(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+
+	rootSrv := NewRootServer(t, "127.0.0.250:"+r.defaultPort, r)
+	comSrv := NewTestServer(t, "127.0.0.100:"+r.defaultPort)
+	netSrv := NewTestServer(t, "127.0.0.100:"+r.defaultPort)
+	expSrv := NewTestServer(t, "127.0.0.101:"+r.defaultPort)
+
+	rootSrv.ExpectQuery("A example.com.").DelegateTo(comSrv.IP())
+	comSrv.ExpectQuery("A example.com.").DelegateTo("ns1.test.net.")
+	rootSrv.ExpectQuery("A ns1.test.net.").DelegateTo(netSrv.IP())
+	netSrv.ExpectQuery("A ns1.test.net.").RespondWith
+
+	rs, err := r.Query(ctx, "A", "1.www.example.com")
+	t.Logf("Trace:\n" + rs.Trace.Dump())
+	assert.NoError(t, err)
+
+	assert.Equal(t, "example.com", rs.Name)
+	assert.Equal(t, "A", rs.Type)
+	assert.Equal(t, 321*time.Second, rs.TTL)
+	assert.Equal(t, []string{"192.0.2.0"}, rs.Values)
 	assert.Equal(t, "127.0.0.101:5354", rs.NameServerAddress)
 	assert.Equal(t, rs.Age, -1*time.Second)
 	assert.Greater(t, rs.RTT, time.Duration(0))
@@ -119,46 +228,4 @@ func TestResolver_Query_SimpleARecord(t *testing.T) {
 
 	assert.Equal(t, wantTrace, rs.Trace.Dump())
 }
-
-func TestResolver_Query_CNAMEResolution(t *testing.T) {
-	r := New()
-	l := NewLab(t, r, map[string]string{
-		"example.com": `
-					@   321 IN CNAME www.example.com.
-					www 321 IN A     192.0.2.1
-				`,
-	})
-	_ = l
-
-	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
-	defer cancel()
-
-	rs, err := r.Query(ctx, "A", "example.com")
-	t.Logf("Trace:\n" + rs.Trace.Dump())
-	assert.NoError(t, err)
-
-	assert.Equal(t, "example.com", rs.Name)
-	assert.Equal(t, "A", rs.Type)
-	assert.Equal(t, 321*time.Second, rs.TTL)
-	assert.Equal(t, []string{"192.0.2.1"}, rs.Values)
-	assert.Equal(t, "127.0.0.101:5354", rs.NameServerAddress)
-	assert.Equal(t, rs.Age, -1*time.Second)
-	assert.Greater(t, rs.RTT, time.Duration(0))
-
-	wantTrace := strings.TrimSpace(`
-? . IN NS @127.0.0.250:5354 0ms
-  ! . 321 IN NS self.test.
-  ! self.test. 321 IN A 127.0.0.250
-    ? com. IN NS @127.0.0.250:5354 0ms
-      ! com. 321 IN NS gtld-server.net.test.
-      ! gtld-server.net.test. 321 IN A 127.0.0.100
-        ? example.com. IN NS @127.0.0.100:5354 0ms
-          ! example.com. 321 IN NS 0.iana-server.net.test.
-          ! 0.iana-server.net.test. 321 IN A 127.0.0.101
-            ? example.com. IN A @127.0.0.101:5354 0ms
-              ! example.com. 321 IN CNAME www.example.com.
-              ! www.example.com. 321 IN A 192.0.2.1
-			`) + "\n"
-
-	assert.Equal(t, wantTrace, rs.Trace.Dump())
-}
+*/

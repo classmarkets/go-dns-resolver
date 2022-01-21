@@ -16,6 +16,7 @@ func RR(t *testing.T, typ uint16, name string, ttl uint32) dns.RR {
 	rr := ctor()
 	hdr := rr.Header()
 	hdr.Name = name
+	hdr.Class = dns.ClassINET
 	hdr.Rrtype = typ
 	hdr.Ttl = ttl
 
@@ -52,6 +53,7 @@ func NS(t *testing.T, name string, ttl uint32, target string) *dns.NS {
 
 	return rr
 }
+
 func CNAME(t *testing.T, name string, ttl uint32, target string) *dns.CNAME {
 	rr := RR(t, dns.TypeCNAME, name, ttl).(*dns.CNAME)
 	rr.Target = target
