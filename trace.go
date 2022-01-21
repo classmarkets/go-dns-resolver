@@ -2,6 +2,7 @@ package dnsresolver
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"regexp"
@@ -119,6 +120,9 @@ type TraceNode struct {
 }
 
 func (n *TraceNode) dump(w io.Writer, depth int) {
+	if depth > 20 {
+		return
+	}
 	if n == nil {
 		return
 	}
@@ -128,10 +132,12 @@ func (n *TraceNode) dump(w io.Writer, depth int) {
 
 	if n.Err != nil {
 		io.WriteString(w, strings.Repeat(" ", depth*4))
-		fmt.Fprintf(w, "  X %v\n", n.Err)
-	}
-
-	if n.Code != dns.RcodeSuccess {
+		if errors.Is(n.Err, ErrCircular) {
+			fmt.Fprintf(w, "  X CYCLE\n")
+		} else {
+			fmt.Fprintf(w, "  X %v\n", n.Err)
+		}
+	} else if n.Code != dns.RcodeSuccess {
 		io.WriteString(w, strings.Repeat(" ", depth*4))
 		fmt.Fprintf(w, "  X %s\n", dns.RcodeToString[n.Code])
 	} else if len(n.Answers) == 0 {

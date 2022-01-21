@@ -45,6 +45,10 @@ func (set nsResponseSet) Err() error { return set.Error }
 func (set nsResponseSet) Addrs() []dns.RR {
 	var rrs []dns.RR
 
+	if set.Response == nil {
+		return nil
+	}
+
 	for _, rr := range append(set.Response.Answer, set.Response.Ns...) {
 		switch rr := rr.(type) {
 		case *dns.A:

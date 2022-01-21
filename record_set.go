@@ -76,7 +76,6 @@ func (rs *RecordSet) fromResult(result queryResult) error {
 		return LookupError{
 			RecordType: rs.Type,
 			DomainName: rs.Name,
-			Message:    "all name servers failed; last error",
 			Cause:      err,
 		}
 	}

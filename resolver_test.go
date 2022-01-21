@@ -2,6 +2,7 @@ package dnsresolver
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -302,4 +303,36 @@ func TestResolver_Query_ZoneGap(t *testing.T) {
 	`) + "\n"
 
 	assert.Equal(t, wantTrace, rs.Trace.Dump())
+}
+
+func TestResolver_Query_DetectCycle(t *testing.T) {
+	r := New()
+	r.defaultPort = "5354"
+	r.logFunc = DebugLog(t)
+	r.ip6disabled = true
+
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+
+	rootSrv := NewRootServer(t, "127.0.0.250:"+r.defaultPort, r)
+	comSrv := NewTestServer(t, "127.0.0.100:"+r.defaultPort)
+	netSrv := NewTestServer(t, "127.0.0.101:"+r.defaultPort)
+
+	rootSrv.ExpectQuery("A example.com.").DelegateTo(comSrv.IP())
+	comSrv.ExpectQuery("A example.com.").DelegateTo("ns1.test.net.")
+	rootSrv.ExpectQuery("A ns1.test.net.").DelegateTo(netSrv.IP())
+	netSrv.ExpectQuery("A ns1.test.net.").Respond().
+		Answer(
+			CNAME(t, "ns1.test.net.", 321, "ns2.test.net."),
+		)
+	rootSrv.ExpectQuery("A ns2.test.net.").DelegateTo(netSrv.IP())
+	netSrv.ExpectQuery("A ns2.test.net.").Respond().
+		Answer(
+			CNAME(t, "ns2.test.net.", 321, "ns1.test.net."),
+		)
+
+	rs, err := r.Query(ctx, "A", "example.com")
+	t.Logf("Trace:\n" + rs.Trace.Dump())
+	assert.EqualError(t, err, "A example.com: circular reference: repeated query: A ns1.test.net. @127.0.0.250:5354")
+	assert.True(t, errors.Is(err, ErrCircular))
 }

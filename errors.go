@@ -22,13 +22,12 @@ var ErrCircular = errors.New("circular reference")
 type LookupError struct {
 	RecordType string
 	DomainName string
-	Message    string
 	Cause      error
 }
 
 func (err LookupError) Unwrap() error { return err.Cause }
 func (err LookupError) Error() string {
-	return fmt.Sprintf("%s %s: %s: %v", err.RecordType, err.DomainName, err.Message, err.Cause)
+	return fmt.Sprintf("%s %s: %v", err.RecordType, err.DomainName, err.Cause)
 }
 
 // ErrorReponse is returned by Resolver.Query if the DNS server responds with a

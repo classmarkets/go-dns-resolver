@@ -56,6 +56,8 @@ type Resolver struct {
 	once              sync.Once
 	systemServerAddrs []string
 	rootServerAddrs   []string
+
+	seen map[string]map[dns.Question]struct{} // used to detect cycles
 }
 
 const maxCacheSize = 10_000
@@ -75,6 +77,7 @@ func New() *Resolver {
 		defaultPort: "53",
 		zoneServers: map[string][]string{},
 		cache:       map[string]cacheItem{},
+		seen:        map[string]map[dns.Question]struct{}{},
 	}
 }
 
@@ -284,29 +287,31 @@ func (r *Resolver) Query(ctx context.Context, recordType string, domainName stri
 }
 
 func (r *Resolver) queryIteratively(ctx context.Context, q dns.Question, trace *Trace) queryResult {
-	nsSet := r.discoverSystemServers()
+	rootNSSet := r.discoverSystemServers()
 	rootNSQuery := dns.Question{
 		Name:   ".",
 		Qtype:  dns.TypeNS,
 		Qclass: dns.ClassINET,
 	}
 
-	result := r.doQuery(ctx, rootNSQuery, nsSet, trace)
+	result := r.doQuery(ctx, rootNSQuery, rootNSSet, trace, true)
 	if result.Error != nil {
 		result.Error = fmt.Errorf("discover root name servers: %w", result.Error)
 		return result
 	}
-	nsSet = nsResponseSet(result)
 
+	nsSet := nsResponseSet(result)
 	for {
-		result := r.doQuery(ctx, q, nsSet, trace)
-
-		if result.isDelegation() {
-			nsSet = nsResponseSet(result)
-			continue
+		result := r.doQuery(ctx, q, nsSet, trace, false)
+		if result.Error != nil {
+			return result
 		}
 
-		return result
+		if !result.isDelegation() {
+			return result
+		}
+
+		nsSet = nsResponseSet(result)
 	}
 }
 
@@ -318,7 +323,7 @@ type queryResult struct {
 	Error      error
 }
 
-func (r *Resolver) doQuery(ctx context.Context, q dns.Question, nsSet nsSet, trace *Trace) queryResult {
+func (r *Resolver) doQuery(ctx context.Context, q dns.Question, nsSet nsSet, trace *Trace, ignoreCycle bool) queryResult {
 	result := queryResult{
 		Question: &q,
 	}
