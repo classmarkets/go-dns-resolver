@@ -19,63 +19,30 @@ import (
 // servers.
 type Trace struct {
 	Queries []*TraceNode
-	idx     map[dns.RR]*TraceAnswer
-
-	roots []*TraceAnswer
+	stack   []*TraceNode
 }
 
-func (t *Trace) pushRoot(root dns.RR) {
-	a := t.idx[root]
-	if a == nil {
-		panic("pushRoot: no answer for trace root")
-	}
-
-	t.roots = append(t.roots, a)
-}
-func (t *Trace) popRoot() {
-	if len(t.roots) == 0 {
-		panic("popRoot: empty stack")
-	}
-
-	t.roots = t.roots[:len(t.roots)-1]
-}
-
-func (t *Trace) add(result queryResult, prev dns.RR) {
-	n := &TraceNode{
-		Question: result.Question,
-		Server:   result.ServerAddr,
-		Err:      result.Error,
-		RTT:      result.RTT,
-	}
-
-	if parent := t.idx[prev]; parent != nil {
-		parent.Next = append(parent.Next, n)
-	} else if len(t.roots) > 0 {
-		parent := t.roots[len(t.roots)-1]
-		parent.Next = append(parent.Next, n)
+func (t *Trace) push() {
+	if len(t.stack) == 0 {
+		t.stack = append(t.stack, t.Queries[len(t.Queries)-1])
 	} else {
+		root := t.stack[len(t.stack)-1]
+		t.stack = append(t.stack, root.Children[len(root.Children)-1])
+	}
+}
+
+func (t *Trace) pop() {
+	if len(t.stack) > 0 {
+		t.stack = t.stack[:len(t.stack)-1]
+	}
+}
+
+func (t *Trace) add(n *TraceNode) {
+	if len(t.stack) == 0 {
 		t.Queries = append(t.Queries, n)
-	}
-
-	if result.Response == nil {
-		return
-	}
-
-	n.Code = result.Response.Rcode
-
-	all := result.Response.Answer
-	all = append(all, result.Response.Ns...)
-	all = append(all, result.Response.Extra...)
-
-	for _, rr := range all {
-		answer := &TraceAnswer{
-			Record: rr,
-		}
-		if t.idx == nil {
-			t.idx = map[dns.RR]*TraceAnswer{}
-		}
-		n.Answers = append(n.Answers, answer)
-		t.idx[rr] = answer
+	} else {
+		root := t.stack[len(t.stack)-1]
+		root.Children = append(root.Children, n)
 	}
 }
 
@@ -97,26 +64,14 @@ func (t *Trace) Dump() string {
 	return buf.String()
 }
 
-type TraceAnswer struct {
-	// Record is a single DNS record that appeared in a DNS response, either in
-	// the ANSWER or ADDITIONAL section.
-	Record dns.RR
-
-	// Next is the DNS query that has been made following this answer. For
-	// instance, if this answer is in response to some NS query, the next query
-	// may be for an A record set, directed at the server mentioned in Record.
-	Next []*TraceNode
-}
-
 type TraceNode struct {
-	Question *dns.Question
-	Server   string
+	Server string
 
-	Err     error
-	Code    int
-	Answers []*TraceAnswer
+	Message *dns.Msg
+	RTT     time.Duration
+	Error   error
 
-	RTT time.Duration
+	Children []*TraceNode
 }
 
 func (n *TraceNode) dump(w io.Writer, depth int) {
@@ -127,29 +82,32 @@ func (n *TraceNode) dump(w io.Writer, depth int) {
 		return
 	}
 
-	io.WriteString(w, strings.Repeat(" ", depth*4))
-	fmt.Fprintf(w, "? %s @%s %vms\n", n.fmt(n.Question), n.Server, n.RTT.Milliseconds())
+	msg := n.Message
 
-	if n.Err != nil {
+	io.WriteString(w, strings.Repeat(" ", depth*4))
+	fmt.Fprintf(w, "? %s @%s %vms\n", n.fmt(&msg.Question[0]), n.Server, n.RTT.Milliseconds())
+
+	if n.Error != nil {
 		io.WriteString(w, strings.Repeat(" ", depth*4))
-		if errors.Is(n.Err, ErrCircular) {
+		if errors.Is(n.Error, ErrCircular) {
 			fmt.Fprintf(w, "  X CYCLE\n")
 		} else {
-			fmt.Fprintf(w, "  X %v\n", n.Err)
+			fmt.Fprintf(w, "  X %v\n", n.Error)
 		}
-	} else if n.Code != dns.RcodeSuccess {
+	}
+	if msg.Rcode != dns.RcodeSuccess {
 		io.WriteString(w, strings.Repeat(" ", depth*4))
-		fmt.Fprintf(w, "  X %s\n", dns.RcodeToString[n.Code])
-	} else if len(n.Answers) == 0 {
+		fmt.Fprintf(w, "  X %s\n", dns.RcodeToString[msg.Rcode])
+	} else if empty(msg) {
 		io.WriteString(w, strings.Repeat(" ", depth*4))
 		fmt.Fprintf(w, "  ~ EMPTY\n")
 	}
 
-	for _, a := range n.Answers {
+	for _, rr := range append(append(msg.Answer, msg.Ns...), msg.Extra...) {
 		io.WriteString(w, strings.Repeat(" ", depth*4))
-		fmt.Fprintf(w, "  ! %v\n", n.fmt(a.Record))
+		fmt.Fprintf(w, "  ! %v\n", n.fmt(rr))
 
-		for _, n := range a.Next {
+		for _, n := range n.Children {
 			n.dump(w, depth+1)
 		}
 	}

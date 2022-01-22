@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"sync"
 	"time"
@@ -35,7 +34,7 @@ type Resolver struct {
 	// records are evicted if necessary.
 	CachePolicy CachePolicy
 
-	logFunc func(queryResult)
+	logFunc func(RecordSet, error)
 
 	// defaultPort is added to things like NS results. This should be "53" for
 	// the real world and "5354" in tests.
@@ -267,171 +266,257 @@ func (r *Resolver) Query(ctx context.Context, recordType string, domainName stri
 		Name:  domainName,
 		Type:  recordType,
 		Age:   -1 * time.Second,
-		Trace: new(Trace),
+		Trace: &Trace{},
 	}
 
 	if _, ok := dns.StringToType[recordType]; !ok {
 		return rs, fmt.Errorf("unsupported record type: %s", recordType)
 	}
 
-	q := dns.Question{
-		Name:   dns.CanonicalName(domainName),
-		Qtype:  dns.StringToType[recordType],
-		Qclass: dns.ClassINET,
+	var stack stack
+
+	rootAddrs, err := r.discoverRootServers(ctx, rs.Trace)
+	if err != nil {
+		return rs, err
+	}
+	if len(rootAddrs) == 0 {
+		return rs, errors.New("no IP addresses in root name server query")
 	}
 
-	result := r.queryIteratively(ctx, q, rs.Trace)
-	err := rs.fromResult(result)
+	stack.push(&stackFrame{
+		q: dns.Question{
+			Name:   dns.CanonicalName(domainName),
+			Qtype:  dns.StringToType[recordType],
+			Qclass: dns.ClassINET,
+		},
+		addrs: rootAddrs,
+	})
 
-	return rs, err
+	var resp *dns.Msg
+
+	for stack.size() > 0 {
+		frame := stack.top()
+
+		if len(frame.addrs) == 0 {
+			return rs, errors.New("servers exhausted")
+		}
+		addr := frame.addrs[0]
+		frame.addrs = frame.addrs[1:]
+
+	retry:
+		host, _, err := net.SplitHostPort(addr)
+		if err != nil {
+			host = addr
+			addr = net.JoinHostPort(addr, r.defaultPort)
+		}
+
+		ip := net.ParseIP(host)
+		if ip == nil {
+			err = fmt.Errorf("not an ip address: %s", host)
+			continue
+		}
+
+		var rtt time.Duration
+		resp, rtt, err = r.doQuery(ctx, frame.q, addr, rs.Trace)
+		if isTerminal(resp, err) {
+			return rs, err
+		} else if err != nil {
+			continue
+		}
+
+		if stack.size() > 1 && empty(resp) {
+			// We're trying to figure out the addresses for a name server but
+			// we didn't get any records back. If we tried to find IPv6
+			// addresses and IPv4 is also supported, don't give up yet. Try
+			// again, this time with A records.
+			if frame.q.Qtype == dns.TypeAAAA && !r.ip4disabled {
+				frame.q.Qtype = dns.TypeA
+				goto retry
+			}
+		}
+
+		if resp.Rcode != dns.RcodeSuccess {
+			continue
+		}
+
+		if isAuthoritative(resp) {
+			stack.pop()
+			rs.Trace.pop()
+
+			if stack.size() == 0 {
+				rs.ServerAddr = addr
+				rs.RTT = rtt
+				rs.Raw = resp
+
+				first := true
+				for _, rr := range normalize(resp) {
+					hdr := rr.Header()
+					if hdr.Name != frame.q.Name {
+						continue
+					}
+
+					ttl := time.Duration(hdr.Ttl) * time.Second
+					if first || ttl < rs.TTL {
+						rs.TTL = ttl
+					}
+					first = false
+
+					rs.Values = append(rs.Values, rrValue(rr))
+				}
+
+				return rs, nil
+			}
+			frame = stack.top()
+		}
+
+		addrs, names := r.referrals(resp)
+
+		if len(addrs) > 0 {
+			frame.addrs = addrs
+		} else if len(names) > 0 {
+			rs.Trace.push()
+			qtype := dns.TypeAAAA
+			if r.ip6disabled {
+				qtype = dns.TypeA
+			}
+			stack.push(&stackFrame{
+				q: dns.Question{
+					// TODO: should we search for the other names too?
+					Name:   names[0],
+					Qtype:  qtype,
+					Qclass: dns.ClassINET,
+				},
+				addrs: rootAddrs,
+			})
+		} else {
+			return rs, errors.New("empty response")
+		}
+	}
+
+	return rs, errors.New("name servers exhausted")
 }
 
-func (r *Resolver) queryIteratively(ctx context.Context, q dns.Question, trace *Trace) queryResult {
-	rootNSSet := r.discoverSystemServers()
-	rootNSQuery := dns.Question{
+type stackFrame struct {
+	q     dns.Question
+	addrs []string
+}
+
+type stack []*stackFrame
+
+func (s *stack) size() int          { return len(*s) }
+func (s *stack) top() *stackFrame   { return (*s)[len(*s)-1] }
+func (s *stack) pop()               { *s = (*s)[:len(*s)-1] }
+func (s *stack) push(f *stackFrame) { *s = append(*s, f) }
+
+func (r *Resolver) discoverRootServers(ctx context.Context, trace *Trace) ([]string, error) {
+	addrs, err := r.discoverSystemServers()
+	if err != nil {
+		return nil, err
+	}
+
+	q := dns.Question{
 		Name:   ".",
 		Qtype:  dns.TypeNS,
 		Qclass: dns.ClassINET,
 	}
 
-	result := r.doQuery(ctx, rootNSQuery, rootNSSet, trace, true)
-	if result.Error != nil {
-		result.Error = fmt.Errorf("discover root name servers: %w", result.Error)
-		return result
-	}
-
-	nsSet := nsResponseSet(result)
-	for {
-		result := r.doQuery(ctx, q, nsSet, trace, false)
-		if result.Error != nil {
-			return result
+	var resp *dns.Msg
+	for _, addr := range addrs {
+		resp, _, err = r.doQuery(ctx, q, addr, trace)
+		if err != nil {
+			continue
 		}
 
-		if !result.isDelegation() {
-			return result
+		addrs, _ := r.referrals(resp)
+		if len(addrs) == 0 {
+			err = errors.New("no IP addresses in root name server query")
+			continue
 		}
 
-		nsSet = nsResponseSet(result)
+		return addrs, nil
 	}
+
+	return nil, fmt.Errorf("discover root servers: %w", err)
 }
 
-type queryResult struct {
-	Question   *dns.Question
-	ServerAddr string
-	RTT        time.Duration
-	Response   *dns.Msg
-	Error      error
+func isTerminal(resp *dns.Msg, err error) bool {
+	return err != nil // TODO
 }
 
-func (r *Resolver) doQuery(ctx context.Context, q dns.Question, nsSet nsSet, trace *Trace, ignoreCycle bool) queryResult {
-	result := queryResult{
-		Question: &q,
-	}
-
-	if err := nsSet.Err(); err != nil {
-		result.Error = fmt.Errorf("%s %s: name server unavailable: %w",
-			dns.TypeToString[q.Qtype], q.Name, err)
-		return result
-	}
-
-	it := newAddrIter(r, nsSet, trace)
-
-	for {
-		rr, addr, err := it.Next(ctx)
-		if err == io.EOF {
-			break
-		}
-		result.ServerAddr = addr
-		if err != nil {
-			result.Error = err
-			trace.add(result, rr)
-			continue
-		}
-
-		// addr should now be an ip:port pair (otherwise the address iterator
-		// messed up). We need an IP address here to prevent net.Dial from
-		// using the OS resolver implicitly.
-		host, _, err := net.SplitHostPort(addr)
-		if err != nil {
-			result.Error = fmt.Errorf("not a host:port pair: %s: %w", addr, err)
-			trace.add(result, rr)
-			continue
-		}
-
-		ip := net.ParseIP(host)
-		if ip == nil {
-			result.Error = fmt.Errorf("not an ip address: %s", host)
-			trace.add(result, rr)
-			continue
-		}
-
-		if ip.To4() != nil {
-			if r.ip4disabled {
-				result.Error = errors.New("IPv4 disabled")
-				trace.add(result, rr)
-				continue
+func (r *Resolver) referrals(m *dns.Msg) (ips, names []string) {
+	for _, rr := range normalize(m) {
+		switch rr := rr.(type) {
+		case *dns.A:
+			if !r.ip4disabled {
+				ips = append(ips, rr.A.String())
 			}
-		} else if r.ip6disabled {
-			result.Error = errors.New("IPv6 disabled")
-			trace.add(result, rr)
-			continue
+		case *dns.AAAA:
+			if !r.ip6disabled {
+				ips = append(ips, rr.AAAA.String())
+			}
+		case *dns.NS:
+			names = append(names, rr.Ns)
+		case *dns.CNAME:
+			names = append(names, rr.Target)
 		}
-
-		result.ServerAddr = addr
-
-		c := new(dns.Client)
-
-		m := new(dns.Msg)
-		m.Question = []dns.Question{q}
-		m.RecursionDesired = q.Qtype == dns.TypeNS && q.Name == "."
-
-		result.Response, result.RTT, result.Error = c.ExchangeContext(ctx, m, addr)
-		trace.add(result, rr)
-		if r.logFunc != nil {
-			r.logFunc(result)
-		}
-
-		if result.Error != nil {
-			continue
-		}
-
-		switch result.Response.Rcode {
-		case dns.RcodeServerFailure:
-			continue
-		}
-
-		return result
 	}
 
-	result.Error = errors.New("no name servers available")
-
-	return result
+	return ips, names
 }
 
-func (r queryResult) isDelegation() bool {
-	if r.Error != nil {
-		return false
+func (r *Resolver) doQuery(ctx context.Context, q dns.Question, addr string, trace *Trace) (*dns.Msg, time.Duration, error) {
+	m := new(dns.Msg)
+	m.Question = []dns.Question{q}
+	m.RecursionDesired = q.Qtype == dns.TypeNS && q.Name == "."
+
+	tn := &TraceNode{
+		Server:  addr,
+		Message: m,
+	}
+	// addr must be an ip:port pair. We need an IP address here to
+	// prevent net.Dial from using the OS resolver implicitly.
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		tn.Error = fmt.Errorf("not an ip:port pair: %s", host)
+		trace.add(tn)
+		return nil, 0, tn.Error
 	}
 
-	// We consider the response a delegation if the response is not
-	// authoritative, and the union of the ANSWER and AUTHORITY sections is
-	// entirely NS records
-
-	resp := r.Response
-
-	if resp.Authoritative {
-		return false
+	ip := net.ParseIP(host)
+	if ip == nil {
+		tn.Error = fmt.Errorf("not an ip:port pair: %s", host)
+		trace.add(tn)
+		return nil, 0, tn.Error
 	}
 
-	if len(resp.Answer)+len(resp.Ns) == 0 {
-		return false
-	}
-
-	for _, rr := range append(resp.Answer, resp.Ns...) {
-		if _, ok := rr.(*dns.NS); !ok {
-			return false
+	if ip.To4() != nil {
+		if r.ip4disabled {
+			tn.Error = fmt.Errorf("IPv4 disabled")
+			trace.add(tn)
+			return nil, 0, tn.Error
 		}
+	} else if r.ip6disabled {
+		tn.Error = fmt.Errorf("IPv6 disabled")
+		trace.add(tn)
+		return nil, 0, tn.Error
 	}
 
-	return true
+	c := new(dns.Client)
+	resp, rtt, err := c.ExchangeContext(ctx, m, addr)
+	tn.Message = resp
+	tn.RTT = rtt
+	tn.Error = err
+	trace.add(tn)
+
+	if r.logFunc != nil {
+		msg := resp
+		msg = m
+		r.logFunc(RecordSet{
+			Raw:        msg,
+			ServerAddr: addr,
+			RTT:        rtt,
+		}, err)
+	}
+
+	return resp, rtt, err
 }

@@ -41,14 +41,10 @@ func NewTestServer(t *testing.T, addr string) *TestServer {
 	return srv
 }
 
-func NewRootServer(t *testing.T, addr string, r *Resolver) *TestServer {
+func NewRootServer(t *testing.T, addr string) *TestServer {
 	ip, _, err := net.SplitHostPort(addr)
 	if err != nil {
 		t.Fatal(err)
-	}
-
-	if r != nil {
-		r.systemServerAddrs = []string{ip}
 	}
 
 	srv := NewTestServer(t, addr)

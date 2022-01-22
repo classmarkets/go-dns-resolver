@@ -7,17 +7,16 @@ import (
 	"github.com/miekg/dns"
 )
 
-func DebugLog(t *testing.T) func(queryResult) {
+func DebugLog(t *testing.T) func(RecordSet, error) {
 
 	f := t.Logf
 	//f = log.Printf
 
-	return func(result queryResult) {
-		q := result.Question
-		resp := result.Response
-		err := result.Error
+	return func(rs RecordSet, err error) {
+		q := rs.Raw.Question[0]
+		resp := rs.Raw
 
-		f("%s\t@%s %dms\n", strings.TrimPrefix(q.String(), ";"), result.ServerAddr, result.RTT.Milliseconds())
+		f("%s\t@%s %dms\n", strings.TrimPrefix(q.String(), ";"), rs.ServerAddr, rs.RTT.Milliseconds())
 		if err != nil {
 			f("\t%v\n", err)
 		} else if resp.Rcode != dns.RcodeSuccess {
