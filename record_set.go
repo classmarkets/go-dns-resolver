@@ -8,7 +8,11 @@ import (
 
 // RecordSet represents the response to a DNS query.
 type RecordSet struct {
-	Raw *dns.Msg
+	// Raw is the miekg/dns message that has been received from the server and
+	// was used to construct this RecordSet. If no response has been received --
+	// due to a network error, for instance -- Raw contains only the
+	// QUESTION section.
+	Raw dns.Msg
 
 	// Name is the fully qualified domain name of this record set. The trailing
 	// dot is omitted.
@@ -66,4 +70,28 @@ type RecordSet struct {
 	// Trace reports all DNS queries that where necessary to retrieve this
 	// RecordSet.
 	Trace *Trace
+}
+
+func (rs *RecordSet) fromResponse(resp *dns.Msg, addr string, rtt time.Duration) {
+	rs.ServerAddr = addr
+	rs.RTT = rtt
+	if resp != nil {
+		rs.Raw = *resp
+	}
+
+	first := true
+	for _, rr := range normalize(resp) {
+		hdr := rr.Header()
+		if hdr.Name != rs.Raw.Question[0].Name {
+			continue
+		}
+
+		ttl := time.Duration(hdr.Ttl) * time.Second
+		if first || ttl < rs.TTL {
+			rs.TTL = ttl
+		}
+		first = false
+
+		rs.Values = append(rs.Values, rrValue(rr))
+	}
 }

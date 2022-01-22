@@ -20,6 +20,12 @@ import (
 type Trace struct {
 	Queries []*TraceNode
 	stack   []*TraceNode
+	seen    map[string]struct{}
+}
+
+func (t *Trace) contains(q dns.Question, addr string) bool {
+	_, ok := t.seen[addr+q.String()]
+	return ok
 }
 
 func (t *Trace) push() {
@@ -38,6 +44,11 @@ func (t *Trace) pop() {
 }
 
 func (t *Trace) add(n *TraceNode) {
+	if t.seen == nil {
+		t.seen = make(map[string]struct{})
+	}
+	t.seen[n.Server+n.Message.Question[0].String()] = struct{}{}
+
 	if len(t.stack) == 0 {
 		t.Queries = append(t.Queries, n)
 	} else {

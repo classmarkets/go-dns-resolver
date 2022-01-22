@@ -263,6 +263,15 @@ func (r *Resolver) ClearCache() {
 // and values will be []string{"192.0.2.0", "192.0.2.1"}
 func (r *Resolver) Query(ctx context.Context, recordType string, domainName string) (RecordSet, error) {
 	rs := RecordSet{
+		Raw: dns.Msg{
+			Question: []dns.Question{
+				{
+					Name:   dns.CanonicalName(domainName),
+					Qtype:  dns.StringToType[recordType],
+					Qclass: dns.ClassINET,
+				},
+			},
+		},
 		Name:  domainName,
 		Type:  recordType,
 		Age:   -1 * time.Second,
@@ -284,11 +293,7 @@ func (r *Resolver) Query(ctx context.Context, recordType string, domainName stri
 	}
 
 	stack.push(&stackFrame{
-		q: dns.Question{
-			Name:   dns.CanonicalName(domainName),
-			Qtype:  dns.StringToType[recordType],
-			Qclass: dns.ClassINET,
-		},
+		q:     rs.Raw.Question[0],
 		addrs: rootAddrs,
 	})
 
@@ -319,7 +324,7 @@ func (r *Resolver) Query(ctx context.Context, recordType string, domainName stri
 		var rtt time.Duration
 		resp, rtt, err = r.doQuery(ctx, frame.q, addr, rs.Trace)
 		if isTerminal(resp, err) {
-			return rs, err
+			return rs, fmt.Errorf("%s %s: %w", rs.Type, rs.Name, err)
 		} else if err != nil {
 			continue
 		}
@@ -344,25 +349,7 @@ func (r *Resolver) Query(ctx context.Context, recordType string, domainName stri
 			rs.Trace.pop()
 
 			if stack.size() == 0 {
-				rs.ServerAddr = addr
-				rs.RTT = rtt
-				rs.Raw = resp
-
-				first := true
-				for _, rr := range normalize(resp) {
-					hdr := rr.Header()
-					if hdr.Name != frame.q.Name {
-						continue
-					}
-
-					ttl := time.Duration(hdr.Ttl) * time.Second
-					if first || ttl < rs.TTL {
-						rs.TTL = ttl
-					}
-					first = false
-
-					rs.Values = append(rs.Values, rrValue(rr))
-				}
+				rs.fromResponse(resp, addr, rtt)
 
 				return rs, nil
 			}
@@ -440,7 +427,7 @@ func (r *Resolver) discoverRootServers(ctx context.Context, trace *Trace) ([]str
 }
 
 func isTerminal(resp *dns.Msg, err error) bool {
-	return err != nil // TODO
+	return errors.Is(err, ErrCircular)
 }
 
 func (r *Resolver) referrals(m *dns.Msg) (ips, names []string) {
@@ -473,6 +460,14 @@ func (r *Resolver) doQuery(ctx context.Context, q dns.Question, addr string, tra
 		Server:  addr,
 		Message: m,
 	}
+
+	if trace.contains(q, addr) {
+		tn.Error = fmt.Errorf("%w: repeated query: %s %s @%s",
+			ErrCircular, dns.TypeToString[q.Qtype], q.Name, addr)
+		trace.add(tn)
+		return nil, 0, tn.Error
+	}
+
 	// addr must be an ip:port pair. We need an IP address here to
 	// prevent net.Dial from using the OS resolver implicitly.
 	host, _, err := net.SplitHostPort(addr)
@@ -512,7 +507,7 @@ func (r *Resolver) doQuery(ctx context.Context, q dns.Question, addr string, tra
 		msg := resp
 		msg = m
 		r.logFunc(RecordSet{
-			Raw:        msg,
+			Raw:        *msg,
 			ServerAddr: addr,
 			RTT:        rtt,
 		}, err)

@@ -344,6 +344,41 @@ func TestResolver_Query_DetectCycle(t *testing.T) {
 	assert.True(t, errors.Is(err, ErrCircular))
 }
 
+func TestResolver_Query_NS(t *testing.T) {
+	r := New()
+	r.defaultPort = "5354"
+	r.logFunc = DebugLog(t)
+
+	rootSrv := NewRootServer(t, "127.0.0.250:"+r.defaultPort)
+	comSrv := NewTestServer(t, "127.0.0.100:"+r.defaultPort)
+	expSrv := NewTestServer(t, "127.0.0.101:"+r.defaultPort)
+
+	r.systemServerAddrs = []string{net.JoinHostPort(rootSrv.IP(), r.defaultPort)}
+
+	rootSrv.ExpectQuery("NS www.example.com.").DelegateTo(comSrv.IP())
+	comSrv.ExpectQuery("NS www.example.com.").DelegateTo(expSrv.IP())
+	expSrv.ExpectQuery("NS www.example.com.").Respond().
+		Answer(
+			NS(t, "www.example.com.", 321, "ns1.example.com."),
+			NS(t, "www.example.com.", 321, "ns2.example.com."),
+		)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+
+	rs, err := r.Query(ctx, "NS", "www.example.com")
+	t.Logf("Trace:\n" + rs.Trace.Dump())
+	assert.NoError(t, err)
+
+	assert.Equal(t, "www.example.com", rs.Name)
+	assert.Equal(t, "NS", rs.Type)
+	assert.Equal(t, 321*time.Second, rs.TTL)
+	assert.Equal(t, []string{"ns1.example.com.", "ns2.example.com."}, rs.Values)
+	assert.Equal(t, "127.0.0.101:5354", rs.ServerAddr)
+	assert.Equal(t, rs.Age, -1*time.Second)
+	assert.Greater(t, rs.RTT, time.Duration(0))
+}
+
 func TestResolver_Referrals(t *testing.T) {
 	cases := []struct {
 		answer     []dns.RR
