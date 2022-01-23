@@ -7,7 +7,7 @@ import (
 	"golang.org/x/net/publicsuffix"
 )
 
-// TimeoutPolicy determines the round-trip timout for a single DNS query.
+// TimeoutPolicy determines the round-trip timeout for a single DNS query.
 //
 // recordType is the type of the record set to be queried, such as "A", "AAAA",
 // "SRV", etc. nameServerAddress is the IP address and port of the server to
