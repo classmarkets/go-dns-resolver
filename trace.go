@@ -81,6 +81,7 @@ type TraceNode struct {
 	Message *dns.Msg
 	RTT     time.Duration
 	Error   error
+	Age     time.Duration
 
 	Children []*TraceNode
 }
@@ -96,7 +97,11 @@ func (n *TraceNode) dump(w io.Writer, depth int) {
 	msg := n.Message
 
 	io.WriteString(w, strings.Repeat(" ", depth*4))
-	fmt.Fprintf(w, "? %s @%s %vms\n", n.fmt(&msg.Question[0]), n.Server, n.RTT.Milliseconds())
+	if n.RTT < 1*time.Millisecond {
+		fmt.Fprintf(w, "? %s @%s (rtt<1ms, age=%v)\n", n.fmt(&msg.Question[0]), n.Server, n.Age)
+	} else {
+		fmt.Fprintf(w, "? %s @%s (rtt=%v, age=%v)\n", n.fmt(&msg.Question[0]), n.Server, n.RTT, n.Age)
+	}
 
 	if n.Error != nil {
 		io.WriteString(w, strings.Repeat(" ", depth*4))

@@ -70,17 +70,6 @@ func TestResolver_SetSystemServers_AddressNormalization(t *testing.T) {
 	})
 }
 
-func TestResolver_DiscoverRootServers(t *testing.T) {
-	return
-	r := New()
-	r.ip6disabled = true
-	r.logFunc = DebugLog(t)
-	//rs, err := r.Query(context.Background(), "A", "google.com")
-	rs, err := r.Query(context.Background(), "A", "cmcdn.de")
-	t.Logf("Trace:\n" + rs.Trace.Dump())
-	assert.NoError(t, err)
-}
-
 func TestResolver_Query_SimpleARecord(t *testing.T) {
 	r := New()
 	r.defaultPort = "5354"
@@ -92,8 +81,8 @@ func TestResolver_Query_SimpleARecord(t *testing.T) {
 
 	r.systemServerAddrs = []string{net.JoinHostPort(rootSrv.IP(), r.defaultPort)}
 
-	rootSrv.ExpectQuery("A www.example.com.").DelegateTo(comSrv.IP())
-	comSrv.ExpectQuery("A www.example.com.").DelegateTo(expSrv.IP()).ViaAuthoritySection()
+	rootSrv.ExpectQuery("A www.example.com.").DelegateTo("com.", comSrv.IP())
+	comSrv.ExpectQuery("A www.example.com.").DelegateTo("example.com.", expSrv.IP()).ViaAuthoritySection()
 	expSrv.ExpectQuery("A www.example.com.").Respond().
 		Answer(
 			A(t, "www.example.com.", 321, "192.0.2.0"),
@@ -116,16 +105,16 @@ func TestResolver_Query_SimpleARecord(t *testing.T) {
 	assert.Greater(t, rs.RTT, time.Duration(0))
 
 	wantTrace := strings.TrimSpace(`
-? . IN NS @127.0.0.250:5354 0ms
+? . IN NS @127.0.0.250:5354 (rtt<1ms, age=0s)
   ! . 321 IN NS self.test.
   ! self.test. 321 IN A 127.0.0.250
-? www.example.com. IN A @127.0.0.250:5354 0ms
+? www.example.com. IN A @127.0.0.250:5354 (rtt<1ms, age=0s)
   ! com. 321 IN NS ns1.test.
   ! ns1.test. 321 IN A 127.0.0.100
-? www.example.com. IN A @127.0.0.100:5354 0ms
-  ! com. 321 IN NS ns1.test.
+? www.example.com. IN A @127.0.0.100:5354 (rtt<1ms, age=-1s)
+  ! example.com. 321 IN NS ns1.test.
   ! ns1.test. 321 IN A 127.0.0.101
-? www.example.com. IN A @127.0.0.101:5354 0ms
+? www.example.com. IN A @127.0.0.101:5354 (rtt<1ms, age=-1s)
   ! www.example.com. 321 IN A 192.0.2.0
   ! www.example.com. 321 IN A 192.0.2.1
 	`) + "\n"
@@ -145,8 +134,8 @@ func TestResolver_Query_Fallback(t *testing.T) {
 
 	r.systemServerAddrs = []string{net.JoinHostPort(rootSrv.IP(), r.defaultPort)}
 
-	rootSrv.ExpectQuery("A www.example.com.").DelegateTo(comSrv.IP())
-	comSrv.ExpectQuery("A www.example.com.").DelegateTo(errSrv.IP(), expSrv.IP())
+	rootSrv.ExpectQuery("A www.example.com.").DelegateTo("com.", comSrv.IP())
+	comSrv.ExpectQuery("A www.example.com.").DelegateTo("example.com.", errSrv.IP(), expSrv.IP())
 	errSrv.ExpectQuery("A www.example.com.").Respond().Status(dns.RcodeServerFailure)
 	expSrv.ExpectQuery("A www.example.com.").Respond().
 		Answer(
@@ -166,20 +155,20 @@ func TestResolver_Query_Fallback(t *testing.T) {
 	assert.Equal(t, "127.0.0.102:5354", rs.ServerAddr)
 
 	wantTrace := strings.TrimSpace(`
-? . IN NS @127.0.0.250:5354 0ms
+? . IN NS @127.0.0.250:5354 (rtt<1ms, age=0s)
   ! . 321 IN NS self.test.
   ! self.test. 321 IN A 127.0.0.250
-? www.example.com. IN A @127.0.0.250:5354 0ms
+? www.example.com. IN A @127.0.0.250:5354 (rtt<1ms, age=0s)
   ! com. 321 IN NS ns1.test.
   ! ns1.test. 321 IN A 127.0.0.100
-? www.example.com. IN A @127.0.0.100:5354 0ms
-  ! com. 321 IN NS ns1.test.
-  ! com. 321 IN NS ns2.test.
+? www.example.com. IN A @127.0.0.100:5354 (rtt<1ms, age=-1s)
+  ! example.com. 321 IN NS ns1.test.
+  ! example.com. 321 IN NS ns2.test.
   ! ns1.test. 321 IN A 127.0.0.101
   ! ns2.test. 321 IN A 127.0.0.102
-? www.example.com. IN A @127.0.0.101:5354 0ms
+? www.example.com. IN A @127.0.0.101:5354 (rtt<1ms, age=-1s)
   X SERVFAIL
-? www.example.com. IN A @127.0.0.102:5354 0ms
+? www.example.com. IN A @127.0.0.102:5354 (rtt<1ms, age=-1s)
   ! www.example.com. 321 IN A 192.0.2.0
   ! www.example.com. 321 IN A 192.0.2.1
 	`) + "\n"
@@ -201,8 +190,8 @@ func TestResolver_Query_CNAMEResolution(t *testing.T) {
 
 	r.systemServerAddrs = []string{net.JoinHostPort(rootSrv.IP(), r.defaultPort)}
 
-	rootSrv.ExpectQuery("A example.com.").DelegateTo(comSrv.IP())
-	comSrv.ExpectQuery("A example.com.").DelegateTo(expSrv.IP())
+	rootSrv.ExpectQuery("A example.com.").DelegateTo("com.", comSrv.IP())
+	comSrv.ExpectQuery("A example.com.").DelegateTo("example.com.", expSrv.IP())
 	expSrv.ExpectQuery("A example.com.").Respond().
 		Answer(
 			CNAME(t, "example.com.", 321, "www.example.com."),
@@ -224,16 +213,16 @@ func TestResolver_Query_CNAMEResolution(t *testing.T) {
 	assert.Greater(t, rs.RTT, time.Duration(0))
 
 	wantTrace := strings.TrimSpace(`
-? . IN NS @127.0.0.250:5354 0ms
+? . IN NS @127.0.0.250:5354 (rtt<1ms, age=0s)
   ! . 321 IN NS self.test.
   ! self.test. 321 IN A 127.0.0.250
-? example.com. IN A @127.0.0.250:5354 0ms
+? example.com. IN A @127.0.0.250:5354 (rtt<1ms, age=0s)
   ! com. 321 IN NS ns1.test.
   ! ns1.test. 321 IN A 127.0.0.100
-? example.com. IN A @127.0.0.100:5354 0ms
-  ! com. 321 IN NS ns1.test.
+? example.com. IN A @127.0.0.100:5354 (rtt<1ms, age=-1s)
+  ! example.com. 321 IN NS ns1.test.
   ! ns1.test. 321 IN A 127.0.0.101
-? example.com. IN A @127.0.0.101:5354 0ms
+? example.com. IN A @127.0.0.101:5354 (rtt<1ms, age=-1s)
   ! example.com. 321 IN CNAME www.example.com.
   ! www.example.com. 321 IN A 192.0.2.1
 			`) + "\n"
@@ -256,14 +245,13 @@ func TestResolver_Query_ZoneGap(t *testing.T) {
 
 	r.systemServerAddrs = []string{net.JoinHostPort(rootSrv.IP(), r.defaultPort)}
 
-	rootSrv.ExpectQuery("A example.com.").DelegateTo(comSrv.IP())
-	comSrv.ExpectQuery("A example.com.").DelegateTo("ns1.test.net.")
+	rootSrv.ExpectQuery("A example.com.").DelegateTo("com.", comSrv.IP())
+	comSrv.ExpectQuery("A example.com.").DelegateTo("example.com.", "ns1.test.net.")
 	{
-		rootSrv.ExpectQuery("AAAA ns1.test.net.").DelegateTo(netSrv.IP())
+		rootSrv.ExpectQuery("AAAA ns1.test.net.").DelegateTo("net.", netSrv.IP())
 		netSrv.ExpectQuery("AAAA ns1.test.net.").Respond().
-			Answer()
+			Answer( /* empty */ )
 
-		rootSrv.ExpectQuery("A ns1.test.net.").DelegateTo(netSrv.IP())
 		netSrv.ExpectQuery("A ns1.test.net.").Respond().
 			Answer(
 				A(t, "ns1.test.net.", 321, expSrv.IP()),
@@ -288,22 +276,22 @@ func TestResolver_Query_ZoneGap(t *testing.T) {
 	assert.Greater(t, rs.RTT, time.Duration(0))
 
 	wantTrace := strings.TrimSpace(`
-? . IN NS @127.0.0.250:5354 0ms
+? . IN NS @127.0.0.250:5354 (rtt<1ms, age=0s)
   ! . 321 IN NS self.test.
   ! self.test. 321 IN A 127.0.0.250
-? example.com. IN A @127.0.0.250:5354 0ms
+? example.com. IN A @127.0.0.250:5354 (rtt<1ms, age=0s)
   ! com. 321 IN NS ns1.test.
   ! ns1.test. 321 IN A 127.0.0.100
-? example.com. IN A @127.0.0.100:5354 0ms
-  ! com. 321 IN NS ns1.test.net.
-    ? ns1.test.net. IN AAAA @127.0.0.250:5354 0ms
-      ! com. 321 IN NS ns1.test.
+? example.com. IN A @127.0.0.100:5354 (rtt<1ms, age=-1s)
+  ! example.com. 321 IN NS ns1.test.net.
+    ? ns1.test.net. IN AAAA @127.0.0.250:5354 (rtt<1ms, age=0s)
+      ! net. 321 IN NS ns1.test.
       ! ns1.test. 321 IN A 127.0.0.101
-    ? ns1.test.net. IN AAAA @127.0.0.101:5354 0ms
+    ? ns1.test.net. IN AAAA @127.0.0.101:5354 (rtt<1ms, age=-1s)
       ~ EMPTY
-    ? ns1.test.net. IN A @127.0.0.101:5354 0ms
+    ? ns1.test.net. IN A @127.0.0.101:5354 (rtt<1ms, age=-1s)
       ! ns1.test.net. 321 IN A 127.0.0.102
-? example.com. IN A @127.0.0.102:5354 0ms
+? example.com. IN A @127.0.0.102:5354 (rtt<1ms, age=-1s)
   ! example.com. 321 IN A 192.0.2.0
 	`) + "\n"
 
@@ -325,14 +313,16 @@ func TestResolver_Query_DetectCycle(t *testing.T) {
 
 	r.systemServerAddrs = []string{net.JoinHostPort(rootSrv.IP(), r.defaultPort)}
 
-	rootSrv.ExpectQuery("A example.com.").DelegateTo(comSrv.IP())
-	comSrv.ExpectQuery("A example.com.").DelegateTo("ns1.test.net.")
-	rootSrv.ExpectQuery("A ns1.test.net.").DelegateTo(netSrv.IP())
+	rootSrv.ExpectQuery("A example.com.").DelegateTo("com.", comSrv.IP())
+	comSrv.ExpectQuery("A example.com.").DelegateTo("example.com.", "ns1.test.net.")
+
+	rootSrv.ExpectQuery("A ns1.test.net.").DelegateTo("net.", netSrv.IP())
 	netSrv.ExpectQuery("A ns1.test.net.").Respond().
 		Answer(
 			CNAME(t, "ns1.test.net.", 321, "ns2.test.net."),
 		)
-	rootSrv.ExpectQuery("A ns2.test.net.").DelegateTo(netSrv.IP())
+
+	rootSrv.ExpectQuery("A ns2.test.net.").DelegateTo("net.", netSrv.IP())
 	netSrv.ExpectQuery("A ns2.test.net.").Respond().
 		Answer(
 			CNAME(t, "ns2.test.net.", 321, "ns1.test.net."),
@@ -355,8 +345,8 @@ func TestResolver_Query_NS(t *testing.T) {
 
 	r.systemServerAddrs = []string{net.JoinHostPort(rootSrv.IP(), r.defaultPort)}
 
-	rootSrv.ExpectQuery("NS www.example.com.").DelegateTo(comSrv.IP())
-	comSrv.ExpectQuery("NS www.example.com.").DelegateTo(expSrv.IP())
+	rootSrv.ExpectQuery("NS www.example.com.").DelegateTo("com.", comSrv.IP())
+	comSrv.ExpectQuery("NS www.example.com.").DelegateTo("example.com", expSrv.IP())
 	expSrv.ExpectQuery("NS www.example.com.").Respond().
 		Answer(
 			NS(t, "www.example.com.", 321, "ns1.example.com."),
@@ -376,6 +366,97 @@ func TestResolver_Query_NS(t *testing.T) {
 	assert.Equal(t, []string{"ns1.example.com.", "ns2.example.com."}, rs.Values)
 	assert.Equal(t, "127.0.0.101:5354", rs.ServerAddr)
 	assert.Equal(t, rs.Age, -1*time.Second)
+	assert.Greater(t, rs.RTT, time.Duration(0))
+}
+
+func TestResolver_Query_Caching_DefaultPolicy(t *testing.T) {
+	r := New()
+	r.defaultPort = "5354"
+	r.logFunc = DebugLog(t)
+
+	rootSrv := NewRootServer(t, "127.0.0.250:"+r.defaultPort)
+	comSrv := NewTestServer(t, "127.0.0.100:"+r.defaultPort)
+	expSrv := NewTestServer(t, "127.0.0.101:"+r.defaultPort)
+
+	r.systemServerAddrs = []string{net.JoinHostPort(rootSrv.IP(), r.defaultPort)}
+
+	rootSrv.ExpectQuery("NS www.example.com.").DelegateTo("com.", comSrv.IP())
+	comSrv.ExpectQuery("NS www.example.com.").DelegateTo("example.com.", expSrv.IP())
+	expSrv.ExpectQuery("NS www.example.com.").Respond().
+		Answer(
+			NS(t, "www.example.com.", 321, "ns1.example.com."),
+			NS(t, "www.example.com.", 321, "ns2.example.com."),
+		)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+
+	rs, err := r.Query(ctx, "NS", "www.example.com")
+	t.Logf("Trace:\n" + rs.Trace.Dump())
+	assert.NoError(t, err)
+
+	comSrv.ExpectQuery("NS www.example.com.").DelegateTo("example.com.", expSrv.IP())
+	expSrv.ExpectQuery("NS www.example.com.").Respond().
+		Answer(
+			NS(t, "www.example.com.", 321, "ns1.example.com."),
+			NS(t, "www.example.com.", 321, "ns2.example.com."),
+		)
+
+	rs, err = r.Query(ctx, "NS", "www.example.com")
+	t.Logf("Trace:\n" + rs.Trace.Dump())
+	assert.NoError(t, err)
+}
+
+func TestResolver_Query_Caching_ObeyResponderAdvice(t *testing.T) {
+	r := New()
+	r.defaultPort = "5354"
+	r.logFunc = DebugLog(t)
+	r.CachePolicy = ObeyResponderAdvice(1 * time.Minute)
+
+	rootSrv := NewRootServer(t, "127.0.0.250:"+r.defaultPort)
+	comSrv := NewTestServer(t, "127.0.0.100:"+r.defaultPort)
+	expSrv := NewTestServer(t, "127.0.0.101:"+r.defaultPort)
+
+	r.systemServerAddrs = []string{net.JoinHostPort(rootSrv.IP(), r.defaultPort)}
+
+	rootSrv.ExpectQuery("A www.example.com.").DelegateTo("com.", comSrv.IP())
+	comSrv.ExpectQuery("A www.example.com.").DelegateTo("example.com.", expSrv.IP())
+	expSrv.ExpectQuery("A www.example.com.").Respond().
+		Answer(
+			A(t, "www.example.com.", 321, "192.0.2.1"),
+		)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+
+	rs, err := r.Query(ctx, "A", "www.example.com")
+	t.Logf("Trace:\n" + rs.Trace.Dump())
+	assert.NoError(t, err)
+
+	assert.Equal(t, "www.example.com", rs.Name)
+	assert.Equal(t, "A", rs.Type)
+	assert.Equal(t, 321*time.Second, rs.TTL)
+	assert.Equal(t, []string{"192.0.2.1"}, rs.Values)
+	assert.Equal(t, "127.0.0.101:5354", rs.ServerAddr)
+	assert.Equal(t, rs.Age, time.Duration(0))
+	assert.Greater(t, rs.RTT, time.Duration(0))
+
+	// Same query again. Since everything is cached, the servers shouldn't
+	// receive any more queries.
+	rootSrv.AssertNoOutstandingExpectations(t)
+	comSrv.AssertNoOutstandingExpectations(t)
+	expSrv.AssertNoOutstandingExpectations(t)
+
+	rs, err = r.Query(ctx, "A", "www.example.com")
+	t.Logf("Trace:\n" + rs.Trace.Dump())
+	assert.NoError(t, err)
+
+	assert.Equal(t, "www.example.com", rs.Name)
+	assert.Equal(t, "A", rs.Type)
+	assert.Equal(t, 321*time.Second, rs.TTL)
+	assert.Equal(t, []string{"192.0.2.1"}, rs.Values)
+	assert.Equal(t, "127.0.0.101:5354", rs.ServerAddr)
+	assert.Greater(t, rs.Age, time.Duration(0))
 	assert.Greater(t, rs.RTT, time.Duration(0))
 }
 

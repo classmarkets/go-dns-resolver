@@ -72,17 +72,19 @@ type RecordSet struct {
 	Trace *Trace
 }
 
-func (rs *RecordSet) fromResponse(resp *dns.Msg, addr string, rtt time.Duration) {
-	rs.ServerAddr = addr
-	rs.RTT = rtt
+func (rs *RecordSet) fromResponse(resp *dns.Msg, addr string, rtt, age time.Duration, ignoreName bool) {
 	if resp != nil {
 		rs.Raw = *resp
 	}
 
+	rs.ServerAddr = addr
+	rs.RTT = rtt
+	rs.Age = age
+
 	first := true
 	for _, rr := range normalize(resp) {
 		hdr := rr.Header()
-		if hdr.Name != rs.Raw.Question[0].Name {
+		if !ignoreName && hdr.Name != rs.Raw.Question[0].Name {
 			continue
 		}
 

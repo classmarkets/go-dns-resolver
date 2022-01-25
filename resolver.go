@@ -5,9 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/classmarkets/go-dsn-resolver/cache"
 	"github.com/miekg/dns"
 )
 
@@ -50,22 +52,13 @@ type Resolver struct {
 	// dots.
 	mu          sync.RWMutex
 	zoneServers map[string][]string
-	cache       map[string]cacheItem
+	cache       *cache.Cache
 
 	once              sync.Once
 	systemServerAddrs []string
 	rootServerAddrs   []string
 
 	seen map[string]map[dns.Question]struct{} // used to detect cycles
-}
-
-const maxCacheSize = 10_000
-
-type cacheItem struct {
-	set        RecordSet
-	addedAt    time.Time
-	lastUsedAt time.Time // for a poor man's LRU cache
-	ttl        time.Duration
 }
 
 // New returns a new Resolver that resolves all queries recursively starting at
@@ -75,7 +68,7 @@ func New() *Resolver {
 	return &Resolver{
 		defaultPort: "53",
 		zoneServers: map[string][]string{},
-		cache:       map[string]cacheItem{},
+		cache:       cache.New(10_000),
 		seen:        map[string]map[dns.Question]struct{}{},
 	}
 }
@@ -190,9 +183,7 @@ func (r *Resolver) normalizeAddrs(addrs []string) ([]string, error) {
 
 // ClearCache removes any cached DNS responses.
 func (r *Resolver) ClearCache() {
-	r.mu.Lock()
-	r.cache = map[string]cacheItem{}
-	r.mu.Unlock()
+	r.cache.Clear()
 }
 
 // Query starts a recursive query for the given record type and DNS name.
@@ -284,6 +275,12 @@ func (r *Resolver) Query(ctx context.Context, recordType string, domainName stri
 
 	var stack stack
 
+	r.mu.Lock()
+	if r.CachePolicy == nil {
+		r.CachePolicy = DefaultCachePolicy()
+	}
+	r.mu.Unlock()
+
 	rootAddrs, err := r.discoverRootServers(ctx, rs.Trace)
 	if err != nil {
 		return rs, err
@@ -321,8 +318,8 @@ func (r *Resolver) Query(ctx context.Context, recordType string, domainName stri
 			continue
 		}
 
-		var rtt time.Duration
-		resp, rtt, err = r.doQuery(ctx, frame.q, addr, rs.Trace)
+		var rtt, age time.Duration
+		resp, rtt, age, err = r.doQuery(ctx, frame.q, addr, rs.Trace)
 		if isTerminal(resp, err) {
 			return rs, fmt.Errorf("%s %s: %w", rs.Type, rs.Name, err)
 		} else if err != nil {
@@ -349,7 +346,7 @@ func (r *Resolver) Query(ctx context.Context, recordType string, domainName stri
 			rs.Trace.pop()
 
 			if stack.size() == 0 {
-				rs.fromResponse(resp, addr, rtt)
+				rs.fromResponse(resp, addr, rtt, age, false)
 
 				return rs, nil
 			}
@@ -409,7 +406,7 @@ func (r *Resolver) discoverRootServers(ctx context.Context, trace *Trace) ([]str
 
 	var resp *dns.Msg
 	for _, addr := range addrs {
-		resp, _, err = r.doQuery(ctx, q, addr, trace)
+		resp, _, _, err = r.doQuery(ctx, q, addr, trace)
 		if err != nil {
 			continue
 		}
@@ -451,7 +448,12 @@ func (r *Resolver) referrals(m *dns.Msg) (ips, names []string) {
 	return ips, names
 }
 
-func (r *Resolver) doQuery(ctx context.Context, q dns.Question, addr string, trace *Trace) (*dns.Msg, time.Duration, error) {
+// doQuery sends a single DNS query. doQuery uses the cache and timeout
+// policies as required, i. e. the response may be served from the cache
+// instead of sending a query to the server at addr.
+//
+// addr must be an ip:port pair.
+func (r *Resolver) doQuery(ctx context.Context, q dns.Question, addr string, trace *Trace) (resp *dns.Msg, rtt, age time.Duration, err error) {
 	m := new(dns.Msg)
 	m.Question = []dns.Question{q}
 	m.RecursionDesired = q.Qtype == dns.TypeNS && q.Name == "."
@@ -465,7 +467,7 @@ func (r *Resolver) doQuery(ctx context.Context, q dns.Question, addr string, tra
 		tn.Error = fmt.Errorf("%w: repeated query: %s %s @%s",
 			ErrCircular, dns.TypeToString[q.Qtype], q.Name, addr)
 		trace.add(tn)
-		return nil, 0, tn.Error
+		return nil, 0, -1 * time.Second, tn.Error
 	}
 
 	// addr must be an ip:port pair. We need an IP address here to
@@ -474,44 +476,77 @@ func (r *Resolver) doQuery(ctx context.Context, q dns.Question, addr string, tra
 	if err != nil {
 		tn.Error = fmt.Errorf("not an ip:port pair: %s", host)
 		trace.add(tn)
-		return nil, 0, tn.Error
+		return nil, 0, -1 * time.Second, tn.Error
 	}
 
 	ip := net.ParseIP(host)
 	if ip == nil {
 		tn.Error = fmt.Errorf("not an ip:port pair: %s", host)
 		trace.add(tn)
-		return nil, 0, tn.Error
+		return nil, 0, -1 * time.Second, tn.Error
 	}
 
 	if ip.To4() != nil {
 		if r.ip4disabled {
 			tn.Error = fmt.Errorf("IPv4 disabled")
 			trace.add(tn)
-			return nil, 0, tn.Error
+			return nil, 0, -1 * time.Second, tn.Error
 		}
 	} else if r.ip6disabled {
 		tn.Error = fmt.Errorf("IPv6 disabled")
 		trace.add(tn)
-		return nil, 0, tn.Error
+		return nil, 0, -1 * time.Second, tn.Error
 	}
 
-	c := new(dns.Client)
-	resp, rtt, err := c.ExchangeContext(ctx, m, addr)
-	tn.Message = resp
+	resp, rtt, age = r.cache.Lookup(q, addr)
+	tn.Age = age
+
+	if resp == nil {
+		age = -1 * time.Second
+		tn.Age = -1 * time.Second
+		resp, rtt, err = new(dns.Client).ExchangeContext(ctx, m, addr)
+	}
+	if resp != nil {
+		tn.Message = resp
+	}
 	tn.RTT = rtt
 	tn.Error = err
+
+	if resp != nil && age < 0 {
+		// Apply cache policy and update cache as required.
+
+		rs := RecordSet{
+			Name: strings.TrimSuffix(q.Name, "."),
+			Type: dns.TypeToString[q.Qtype],
+		}
+		rs.fromResponse(resp.Copy(), addr, rtt, age, true)
+
+		r.mu.RLock()
+		cp := r.CachePolicy
+		r.mu.RUnlock()
+
+		ttl := cp(rs)
+		if ttl > 0 {
+			age = 0
+			tn.Age = 0
+			r.cache.Update(q, addr, resp, ttl)
+		}
+	}
+
 	trace.add(tn)
 
 	if r.logFunc != nil {
 		msg := resp
-		msg = m
+		if resp == nil {
+			msg = m
+		}
 		r.logFunc(RecordSet{
 			Raw:        *msg,
 			ServerAddr: addr,
 			RTT:        rtt,
+			Age:        age,
 		}, err)
 	}
 
-	return resp, rtt, err
+	return resp, rtt, age, err
 }

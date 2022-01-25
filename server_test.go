@@ -15,14 +15,15 @@ type testHandler interface {
 type TestServer struct {
 	dns.Server
 
-	t        *testing.T
-	handlers map[string]testHandler
+	t          *testing.T
+	handlers   map[string][]testHandler
+	inShutdown chan (struct{})
 }
 
 func NewTestServer(t *testing.T, addr string) *TestServer {
 	srv := &TestServer{
 		t:        t,
-		handlers: map[string]testHandler{},
+		handlers: map[string][]testHandler{},
 	}
 
 	t.Logf("Starting name server on %s/udp", addr)
@@ -61,23 +62,38 @@ func NewRootServer(t *testing.T, addr string) *TestServer {
 }
 
 func (ts *TestServer) Start() {
-	expectErr := make(chan struct{})
+	ts.inShutdown = make(chan struct{})
 
-	ts.t.Cleanup(func() {
-		close(expectErr)
-		ts.Shutdown()
-	})
+	ts.t.Cleanup(ts.Stop)
 
 	go func() {
 		err := ts.ActivateAndServe()
 		select {
-		case <-expectErr:
+		case <-ts.inShutdown:
 		default:
 			if err != nil {
 				ts.t.Fatal(err)
 			}
 		}
 	}()
+}
+
+func (ts *TestServer) Stop() {
+	close(ts.inShutdown)
+	ts.Shutdown()
+	ts.AssertNoOutstandingExpectations(ts.t)
+}
+
+func (ts *TestServer) AssertNoOutstandingExpectations(t *testing.T) {
+	for pattern, hs := range ts.handlers {
+		switch len(hs) {
+		case 0:
+		case 1:
+			t.Errorf("Expected one more query for %s @%s", pattern, ts.PacketConn.LocalAddr())
+		default:
+			t.Errorf("Expected %d more query for %s @%s", len(hs), pattern, ts.PacketConn.LocalAddr())
+		}
+	}
 }
 
 func (ts *TestServer) IP() string {
@@ -95,7 +111,7 @@ type expectation struct {
 
 func (ts *TestServer) ExpectQuery(pattern string) *expectation {
 	h := &expectation{}
-	ts.handlers[pattern] = h
+	ts.handlers[pattern] = append(ts.handlers[pattern], h)
 
 	return h
 }
@@ -111,8 +127,8 @@ func (ts *TestServer) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 		dns.TypeToString[q.Qtype], q.Name,
 	)
 
-	h := ts.handlers[pattern]
-	if h == nil {
+	hs := ts.handlers[pattern]
+	if len(hs) == 0 {
 		ts.t.Errorf("Unexpected query: %s", pattern)
 
 		m := new(dns.Msg)
@@ -121,6 +137,8 @@ func (ts *TestServer) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 
 		return
 	}
+	h := hs[0]
+	ts.handlers[pattern] = hs[1:]
 
 	h.ServeDNS(ts.t, w, r)
 }
@@ -194,12 +212,18 @@ func (h *serveHandler) Additional(rrs ...dns.RR) *serveHandler {
 }
 
 type delegationHandler struct {
+	zone          string
 	upstreamAddrs []string
 	viaAuthority  bool
 }
 
-func (h *expectation) DelegateTo(addr ...string) *delegationHandler {
+func (h *expectation) DelegateTo(zone string, addr ...string) *delegationHandler {
+	if len(addr) == 0 {
+		panic("no addrs specified")
+	}
+
 	x := &delegationHandler{
+		zone:          dns.CanonicalName(zone),
 		upstreamAddrs: addr,
 	}
 
@@ -222,14 +246,14 @@ func (h *delegationHandler) ServeDNS(t *testing.T, w dns.ResponseWriter, r *dns.
 		name := fmt.Sprintf("ns%d.test.", i+1)
 		if net.ParseIP(addr) != nil {
 			m.Answer = append(m.Answer,
-				NS(t, "com.", 321, name),
+				NS(t, h.zone, 321, name),
 			)
 			m.Extra = append(m.Extra,
 				A(t, name, 321, addr),
 			)
 		} else {
 			m.Answer = append(m.Answer,
-				NS(t, "com.", 321, addr),
+				NS(t, h.zone, 321, addr),
 			)
 		}
 	}
