@@ -122,10 +122,10 @@ func (n *TraceNode) dump(w io.Writer, depth int) {
 	for _, rr := range append(append(msg.Answer, msg.Ns...), msg.Extra...) {
 		io.WriteString(w, strings.Repeat(" ", depth*4))
 		fmt.Fprintf(w, "  ! %v\n", n.fmt(rr))
+	}
 
-		for _, n := range n.Children {
-			n.dump(w, depth+1)
-		}
+	for _, n := range n.Children {
+		n.dump(w, depth+1)
 	}
 }
 
