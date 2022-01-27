@@ -7,7 +7,8 @@ import (
 )
 
 func empty(m *dns.Msg) bool {
-	return len(m.Answer)+len(m.Ns)+len(m.Extra) == 0
+	return m == nil ||
+		len(m.Answer)+len(m.Ns)+len(m.Extra) == 0
 }
 
 func rrValue(rr dns.RR) string {

@@ -313,8 +313,6 @@ func (r *resolver) Query(ctx context.Context, recordType string, domainName stri
 		resp, rtt, age, err = r.doQuery(ctx, frame.q, addr, rs.Trace)
 		if isTerminal(resp, err) {
 			return rs, fmt.Errorf("%s %s: %w", rs.Type, rs.Name, err)
-		} else if err != nil {
-			continue
 		}
 
 		if stack.size() > 1 && empty(resp) {
@@ -326,11 +324,29 @@ func (r *resolver) Query(ctx context.Context, recordType string, domainName stri
 				frame.q.Qtype = dns.TypeA
 				goto retry
 			}
+
+			if len(frame.altNames) > 0 {
+				frame.q.Name = frame.altNames[0]
+				if !r.ip6disabled {
+					frame.q.Qtype = dns.TypeAAAA
+				}
+				frame.altNames = frame.altNames[1:]
+				addr = rootAddrs[0]
+				frame.addrs = rootAddrs[1:]
+
+				goto retry
+			}
+		}
+
+		if err != nil {
+			continue
 		}
 
 		if resp.Rcode != dns.RcodeSuccess {
 			continue
 		}
+
+		// TODO: cache addresses of TLD servers
 
 		if isAuthoritative(resp) {
 			stack.pop()
@@ -356,12 +372,12 @@ func (r *resolver) Query(ctx context.Context, recordType string, domainName stri
 			}
 			stack.push(&stackFrame{
 				q: dns.Question{
-					// TODO: should we search for the other names too?
 					Name:   names[0],
 					Qtype:  qtype,
 					Qclass: dns.ClassINET,
 				},
-				addrs: rootAddrs,
+				altNames: names[1:],
+				addrs:    rootAddrs,
 			})
 		} else {
 			return rs, errors.New("empty response")
@@ -372,8 +388,9 @@ func (r *resolver) Query(ctx context.Context, recordType string, domainName stri
 }
 
 type stackFrame struct {
-	q     dns.Question
-	addrs []string
+	q        dns.Question
+	altNames []string
+	addrs    []string
 }
 
 type stack []*stackFrame

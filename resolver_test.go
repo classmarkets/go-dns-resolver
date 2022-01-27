@@ -269,6 +269,77 @@ func TestResolver_Query_ZoneGap(t *testing.T) {
 	assert.Equal(t, wantTrace, rs.Trace.Dump())
 }
 
+func TestResolver_Query_NameFallback(t *testing.T) {
+	r := New()
+	r.defaultPort = "5354"
+	r.logFunc = DebugLog(t)
+
+	rootSrv := NewRootServer(t, "127.0.0.250:"+r.defaultPort)
+	comSrv := NewTestServer(t, "127.0.0.100:"+r.defaultPort)
+	netSrv := NewTestServer(t, "127.0.0.101:"+r.defaultPort)
+	orgSrv := NewTestServer(t, "127.0.0.102:"+r.defaultPort)
+	dd24Srv := NewTestServer(t, "127.0.0.103:"+r.defaultPort)
+	awsSrv := NewTestServer(t, "127.0.0.104:"+r.defaultPort)
+
+	r.systemServerAddrs = []string{net.JoinHostPort(rootSrv.IP(), r.defaultPort)}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	rootSrv.ExpectQuery("NS dr.classmarkets.com.").DelegateTo("com.", comSrv.IP())
+	comSrv.ExpectQuery("NS dr.classmarkets.com.").DelegateTo("classmarkets.com.",
+		"ns1.domaindiscount24.net.",
+		"ns2.domaindiscount24.net.",
+		"ns3.domaindiscount24.net.",
+	)
+	{
+		rootSrv.ExpectQuery("AAAA ns1.domaindiscount24.net.").DelegateTo("net.", netSrv.IP())
+		netSrv.ExpectQuery("AAAA ns1.domaindiscount24.net.").DelegateTo("domaindiscount24.net.", dd24Srv.IP())
+		dd24Srv.ExpectQuery("AAAA ns1.domaindiscount24.net.").Respond().Status(dns.RcodeServerFailure)
+		dd24Srv.ExpectQuery("A ns1.domaindiscount24.net.").Respond().
+			Answer(
+				A(t, "ns1.domaindiscount24.net.", 300, dd24Srv.IP()),
+			)
+	}
+	dd24Srv.ExpectQuery("NS dr.classmarkets.com.").DelegateTo("dr.classmarkets.com.",
+		"ns-1094.awsdns-08.org.",
+		"ns-180.awsdns-22.com.",
+		"ns-1990.awsdns-56.co.uk.",
+		"ns-761.awsdns-31.net.",
+	)
+	{
+		rootSrv.ExpectQuery("AAAA ns-1094.awsdns-08.org.").DelegateTo("org.", orgSrv.IP())
+		orgSrv.ExpectQuery("AAAA ns-1094.awsdns-08.org.").DelegateTo("awsdns-08.org.", awsSrv.IP())
+		awsSrv.ExpectQuery("AAAA ns-1094.awsdns-08.org.").Respond().Status(dns.RcodeServerFailure)
+		awsSrv.ExpectQuery("A ns-1094.awsdns-08.org.").Respond().Status(dns.RcodeServerFailure)
+
+		rootSrv.ExpectQuery("AAAA ns-180.awsdns-22.com.").DelegateTo("com.", comSrv.IP())
+		comSrv.ExpectQuery("AAAA ns-180.awsdns-22.com.").DelegateTo("awsdns-22.com.", awsSrv.IP())
+		awsSrv.ExpectQuery("AAAA ns-180.awsdns-22.com.").Respond().Status(dns.RcodeRefused)
+		awsSrv.ExpectQuery("A ns-180.awsdns-22.com.").Respond().
+			Answer(
+				A(t, "ns-180.awsdns-22.com.", 300, awsSrv.IP()),
+			)
+	}
+	awsSrv.ExpectQuery("NS dr.classmarkets.com.").Respond().
+		Answer(
+			NS(t, "dr.classmarkets.com.", 300, "ns-1990.awsdns-56.co.uk."),
+			NS(t, "dr.classmarkets.com.", 300, "ns-761.awsdns-31.net."),
+			NS(t, "dr.classmarkets.com.", 300, "ns-1094.awsdns-08.org."),
+			NS(t, "dr.classmarkets.com.", 300, "ns-180.awsdns-22.com."),
+		)
+
+	rs, err := r.Query(ctx, "NS", "dr.classmarkets.com")
+	t.Logf("Trace:\n" + rs.Trace.Dump())
+	assert.NoError(t, err)
+	assert.Equal(t, []string{
+		"ns-1990.awsdns-56.co.uk.",
+		"ns-761.awsdns-31.net.",
+		"ns-1094.awsdns-08.org.",
+		"ns-180.awsdns-22.com.",
+	}, rs.Values)
+}
+
 func TestResolver_Query_DetectCycle(t *testing.T) {
 	r := New()
 	r.defaultPort = "5354"
