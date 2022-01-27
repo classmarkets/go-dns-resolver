@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/classmarkets/go-dsn-resolver/cache"
+	"github.com/classmarkets/go-dns-resolver/cache"
 	"github.com/miekg/dns"
 )
 

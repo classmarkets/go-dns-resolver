@@ -1,4 +1,4 @@
-module github.com/classmarkets/go-dsn-resolver
+module github.com/classmarkets/go-dns-resolver
 
 go 1.17
 
