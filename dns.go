@@ -18,6 +18,13 @@ func isAuthoritative(m *dns.Msg) bool {
 	return m != nil && m.Authoritative
 }
 
+func trimTrailingDot(s string) string {
+	if s == "." {
+		return s
+	}
+	return strings.TrimSuffix(s, ".")
+}
+
 // normalize returns a copy of m's records with CNAME and NS records replaced
 // with matching records in m.Extra if possible. CNAME and NS records without a
 // match are left as-is. Circular references and duplicate records are removed.

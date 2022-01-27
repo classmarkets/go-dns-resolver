@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"strings"
 	"sync"
 	"time"
 
@@ -276,6 +275,9 @@ func (r *Resolver) Query(ctx context.Context, recordType string, domainName stri
 	var stack stack
 
 	r.mu.Lock()
+	if r.TimeoutPolicy == nil {
+		r.TimeoutPolicy = DefaultTimeoutPolicy()
+	}
 	if r.CachePolicy == nil {
 		r.CachePolicy = DefaultCachePolicy()
 	}
@@ -504,7 +506,19 @@ func (r *Resolver) doQuery(ctx context.Context, q dns.Question, addr string, tra
 	if resp == nil {
 		age = -1 * time.Second
 		tn.Age = -1 * time.Second
+
+		r.mu.RLock()
+		top := r.TimeoutPolicy
+		r.mu.RUnlock()
+
+		to := top(dns.TypeToString[q.Qtype], trimTrailingDot(q.Name), addr)
+		cancel := func() {}
+		if to > 0 {
+			ctx, cancel = context.WithTimeout(ctx, to)
+		}
+
 		resp, rtt, err = new(dns.Client).ExchangeContext(ctx, m, addr)
+		cancel()
 	}
 	if resp != nil {
 		tn.Message = resp
@@ -516,7 +530,7 @@ func (r *Resolver) doQuery(ctx context.Context, q dns.Question, addr string, tra
 		// Apply cache policy and update cache as required.
 
 		rs := RecordSet{
-			Name: strings.TrimSuffix(q.Name, "."),
+			Name: trimTrailingDot(q.Name),
 			Type: dns.TypeToString[q.Qtype],
 		}
 		rs.fromResponse(resp.Copy(), addr, rtt, age, true)

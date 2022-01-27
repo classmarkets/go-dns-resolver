@@ -11,9 +11,10 @@ import (
 
 // TimeoutPolicy determines the round-trip timeout for a single DNS query.
 //
-// recordType is the type of the record set to be queried, such as "A", "AAAA",
-// "SRV", etc. nameServerAddress is the IP address and port of the server to
-// query.
+// recordType is the type of the record set to be queried, such as "A",
+// "AAAA", "SRV", etc. domainName is the fully qualified name to be queried,
+// with the trailing dot is omitted. nameServerAddress is the IP address and
+// port of the server to query.
 //
 // Any non-positive duration is understood as an infinite timeout.
 type TimeoutPolicy func(recordType, domainName string, nameServerAddress string) (timeout time.Duration)
