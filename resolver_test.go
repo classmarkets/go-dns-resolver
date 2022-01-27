@@ -12,35 +12,6 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestResolver_WithZoneServer_AddressNormalization(t *testing.T) {
-	t.Parallel()
-
-	t.Run("valid", func(t *testing.T) {
-		r := New()
-
-		err := r.WithZoneServer("example.com", []string{"127.0.0.1", "127.0.0.2:5353"})
-
-		assert.NoError(t, err)
-		assert.Equal(t, r.zoneServers["example.com"], []string{"127.0.0.1:53", "127.0.0.2:5353"})
-	})
-	t.Run("unique", func(t *testing.T) {
-		r := New()
-
-		err := r.WithZoneServer("example.com", []string{"127.0.0.1", "127.0.0.1:53"})
-
-		assert.NoError(t, err)
-		assert.Equal(t, r.zoneServers["example.com"], []string{"127.0.0.1:53"})
-	})
-	t.Run("invalid", func(t *testing.T) {
-		r := New()
-
-		err := r.WithZoneServer("example.com", []string{"127.0.0.1", "localhost:5353"})
-
-		assert.EqualError(t, err, "not an ip address: localhost:5353")
-		assert.Len(t, r.zoneServers, 0)
-	})
-}
-
 func TestResolver_SetSystemServers_AddressNormalization(t *testing.T) {
 	t.Parallel()
 
@@ -650,7 +621,7 @@ func TestResolver_Referrals(t *testing.T) {
 				Extra:  tc.additional,
 			}
 
-			r := new(Resolver)
+			r := new(resolver)
 			r.ip4disabled = tc.ip4disabled
 			r.ip6disabled = tc.ip6disabled
 

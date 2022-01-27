@@ -10,22 +10,15 @@ import (
 )
 
 func (r *Resolver) discoverSystemServers() ([]string, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	if r.systemServerAddrs == nil {
-		config, err := dns.ClientConfigFromFile("/etc/resolv.conf")
-		if err != nil {
-			return nil, err
-		}
-
-		for _, addr := range config.Servers {
-			r.systemServerAddrs = append(r.systemServerAddrs, net.JoinHostPort(addr, r.defaultPort))
-		}
+	config, err := dns.ClientConfigFromFile("/etc/resolv.conf")
+	if err != nil {
+		return nil, err
 	}
 
-	addrs := make([]string, len(r.systemServerAddrs))
-	copy(addrs, r.systemServerAddrs)
+	var addrs []string
+	for _, addr := range config.Servers {
+		addrs = append(addrs, net.JoinHostPort(addr, r.defaultPort))
+	}
 
 	return addrs, nil
 }

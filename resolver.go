@@ -18,6 +18,10 @@ import (
 // Resolver must not be changed until all method calls have returned, of
 // course.
 type Resolver struct {
+	// mu protects against races in Query, which initializes fields with their
+	// default values if necessary.
+	mu sync.RWMutex
+
 	// TimeoutPolicy determines the round-trip timout for a single DNS query.
 	// If nil, DefaultTimeoutPolicy() is used.
 	TimeoutPolicy TimeoutPolicy
@@ -44,20 +48,28 @@ type Resolver struct {
 	ip4disabled bool
 	ip6disabled bool
 
-	// mu protects zoneServers and cache.
-	//
-	// zoneServers and cache contain lists of ip:port pairs and cacheItems
-	// respectively, keyed by fully qualified domain names, including trailing
-	// dots.
-	mu          sync.RWMutex
-	zoneServers map[string][]string
-	cache       *cache.Cache
-
-	once              sync.Once
 	systemServerAddrs []string
-	rootServerAddrs   []string
 
-	seen map[string]map[dns.Question]struct{} // used to detect cycles
+	cache *cache.Cache
+}
+
+// resolver is the same as Resolver, but doesn't need a mutex because it is
+// created for each call to Resolver.Query and therefore not used
+// concurrently.
+type resolver struct {
+	TimeoutPolicy TimeoutPolicy
+	CachePolicy   CachePolicy
+	logFunc       func(RecordSet, error)
+
+	defaultPort string
+
+	ip4disabled bool
+	ip6disabled bool
+
+	cache *cache.Cache
+
+	systemServerAddrs []string
+	seen              map[string]map[dns.Question]struct{} // used to detect cycles
 }
 
 // New returns a new Resolver that resolves all queries recursively starting at
@@ -65,61 +77,11 @@ type Resolver struct {
 // DefaultCachePolicy.
 func New() *Resolver {
 	return &Resolver{
-		defaultPort: "53",
-		zoneServers: map[string][]string{},
-		cache:       cache.New(10_000),
-		seen:        map[string]map[dns.Question]struct{}{},
+		TimeoutPolicy: DefaultTimeoutPolicy(),
+		CachePolicy:   DefaultCachePolicy(),
+		defaultPort:   "53",
+		cache:         cache.New(10_000),
 	}
-}
-
-// WithZoneServer causes the resolver to use the specified name servers for the
-// given DNS zone (a DNS zone is a suffix of a fully qualified domain name).
-//
-// For instance,
-//
-//     r := dnsresolver.New()
-//     r.WithZoneServer("example.com", []string{"10.0.0.100"})
-//     r.Query(ctx, "A", "foo.example.com")
-//
-// results in the following DNS queries:
-//
-//          TYPE  NAME              SERVER
-//     1)     NS  foo.example.com.  @10.0.0.100
-//     2.a)    A  foo.example.com.  @10.0.0.100               ; if the NS query results in an NXDOMAIN response
-//     2.b)    A  foo.example.com.  @{1st NS record from 1)}  ; otherwise
-//
-// Note the absent NS queries for .com and .example.com.
-//
-// zone is always understood as a fully qualified domain name, making the
-// trailing dot optional.
-//
-// Name servers MUST be specified as IPv4 or IPv6 addresses. The port is
-// optional and defaults to 53. If serverAddresses is nil or empty, the zone's
-// name servers are determined with DNS queries as usual.
-//
-// WithZoneServer may be called multiple times to add servers for distinct
-// zones, but repeated calls with the same zone will overwrite any prior calls.
-func (r *Resolver) WithZoneServer(zone string, serverAddresses []string) error {
-	if len(serverAddresses) == 0 {
-		r.mu.Lock()
-		delete(r.zoneServers, zone)
-		r.mu.Unlock()
-
-		return nil
-	}
-
-	// TODO: validate and normalize zone
-
-	serverAddresses, err := r.normalizeAddrs(serverAddresses)
-	if err != nil {
-		return err
-	}
-
-	r.mu.Lock()
-	r.zoneServers[zone] = serverAddresses
-	r.mu.Unlock()
-
-	return nil
 }
 
 // SetSystemServers specifies the IP addresses and, optionally, ports for the
@@ -251,7 +213,7 @@ func (r *Resolver) ClearCache() {
 //
 // then Name will be "example.com", Type will be "A", TTL will be 555 seconds,
 // and values will be []string{"192.0.2.0", "192.0.2.1"}
-func (r *Resolver) Query(ctx context.Context, recordType string, domainName string) (RecordSet, error) {
+func (R *Resolver) Query(ctx context.Context, recordType string, domainName string) (RecordSet, error) {
 	rs := RecordSet{
 		Raw: dns.Msg{
 			Question: []dns.Question{
@@ -272,16 +234,43 @@ func (r *Resolver) Query(ctx context.Context, recordType string, domainName stri
 		return rs, fmt.Errorf("unsupported record type: %s", recordType)
 	}
 
-	var stack stack
+	R.mu.Lock()
 
-	r.mu.Lock()
-	if r.TimeoutPolicy == nil {
-		r.TimeoutPolicy = DefaultTimeoutPolicy()
+	var err error
+	if len(R.systemServerAddrs) == 0 {
+		R.systemServerAddrs, err = R.discoverSystemServers()
 	}
-	if r.CachePolicy == nil {
-		r.CachePolicy = DefaultCachePolicy()
+	if err != nil {
+		R.mu.Unlock()
+		return rs, fmt.Errorf("cannot determine system resolvers: %w", err)
 	}
-	r.mu.Unlock()
+
+	if R.TimeoutPolicy == nil {
+		R.TimeoutPolicy = DefaultTimeoutPolicy()
+	}
+	if R.CachePolicy == nil {
+		R.CachePolicy = DefaultCachePolicy()
+	}
+
+	r := &resolver{
+		TimeoutPolicy:     R.TimeoutPolicy,
+		CachePolicy:       R.CachePolicy,
+		logFunc:           R.logFunc,
+		defaultPort:       R.defaultPort,
+		ip4disabled:       R.ip4disabled,
+		ip6disabled:       R.ip6disabled,
+		cache:             R.cache,
+		systemServerAddrs: R.systemServerAddrs,
+		seen:              map[string]map[dns.Question]struct{}{},
+	}
+
+	R.mu.Unlock()
+
+	return r.Query(ctx, recordType, domainName, rs)
+}
+
+func (r *resolver) Query(ctx context.Context, recordType string, domainName string, rs RecordSet) (RecordSet, error) {
+	var stack stack
 
 	rootAddrs, err := r.discoverRootServers(ctx, rs.Trace)
 	if err != nil {
@@ -394,10 +383,9 @@ func (s *stack) top() *stackFrame   { return (*s)[len(*s)-1] }
 func (s *stack) pop()               { *s = (*s)[:len(*s)-1] }
 func (s *stack) push(f *stackFrame) { *s = append(*s, f) }
 
-func (r *Resolver) discoverRootServers(ctx context.Context, trace *Trace) ([]string, error) {
-	addrs, err := r.discoverSystemServers()
-	if err != nil {
-		return nil, err
+func (r *resolver) discoverRootServers(ctx context.Context, trace *Trace) ([]string, error) {
+	if len(r.systemServerAddrs) == 0 {
+		return nil, errors.New("system resolvers not discovered")
 	}
 
 	q := dns.Question{
@@ -406,8 +394,11 @@ func (r *Resolver) discoverRootServers(ctx context.Context, trace *Trace) ([]str
 		Qclass: dns.ClassINET,
 	}
 
-	var resp *dns.Msg
-	for _, addr := range addrs {
+	var (
+		resp *dns.Msg
+		err  error
+	)
+	for _, addr := range r.systemServerAddrs {
 		resp, _, _, err = r.doQuery(ctx, q, addr, trace)
 		if err != nil {
 			continue
@@ -429,7 +420,7 @@ func isTerminal(resp *dns.Msg, err error) bool {
 	return errors.Is(err, ErrCircular)
 }
 
-func (r *Resolver) referrals(m *dns.Msg) (ips, names []string) {
+func (r *resolver) referrals(m *dns.Msg) (ips, names []string) {
 	for _, rr := range normalize(m) {
 		switch rr := rr.(type) {
 		case *dns.A:
@@ -455,7 +446,7 @@ func (r *Resolver) referrals(m *dns.Msg) (ips, names []string) {
 // instead of sending a query to the server at addr.
 //
 // addr must be an ip:port pair.
-func (r *Resolver) doQuery(ctx context.Context, q dns.Question, addr string, trace *Trace) (resp *dns.Msg, rtt, age time.Duration, err error) {
+func (r *resolver) doQuery(ctx context.Context, q dns.Question, addr string, trace *Trace) (resp *dns.Msg, rtt, age time.Duration, err error) {
 	m := new(dns.Msg)
 	m.Question = []dns.Question{q}
 	m.RecursionDesired = q.Qtype == dns.TypeNS && q.Name == "."
@@ -507,11 +498,7 @@ func (r *Resolver) doQuery(ctx context.Context, q dns.Question, addr string, tra
 		age = -1 * time.Second
 		tn.Age = -1 * time.Second
 
-		r.mu.RLock()
-		top := r.TimeoutPolicy
-		r.mu.RUnlock()
-
-		to := top(dns.TypeToString[q.Qtype], trimTrailingDot(q.Name), addr)
+		to := r.TimeoutPolicy(dns.TypeToString[q.Qtype], trimTrailingDot(q.Name), addr)
 		cancel := func() {}
 		if to > 0 {
 			ctx, cancel = context.WithTimeout(ctx, to)
@@ -535,11 +522,7 @@ func (r *Resolver) doQuery(ctx context.Context, q dns.Question, addr string, tra
 		}
 		rs.fromResponse(resp.Copy(), addr, rtt, age, true)
 
-		r.mu.RLock()
-		cp := r.CachePolicy
-		r.mu.RUnlock()
-
-		ttl := cp(rs)
+		ttl := r.CachePolicy(rs)
 		if ttl > 0 {
 			age = 0
 			tn.Age = 0
