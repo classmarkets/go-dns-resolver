@@ -4,6 +4,8 @@
 package dnsresolver
 
 import (
+	"net"
+
 	"github.com/miekg/dns"
 )
 
@@ -18,7 +20,7 @@ func (r *Resolver) discoverSystemServers() ([]string, error) {
 		}
 
 		for _, addr := range config.Servers {
-			r.systemServerAddrs = append(r.systemServerAddrs, addr)
+			r.systemServerAddrs = append(r.systemServerAddrs, net.JoinHostPort(addr, r.defaultPort))
 		}
 	}
 
