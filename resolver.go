@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/classmarkets/go-dns-resolver/cache"
@@ -309,6 +310,14 @@ func (r *resolver) Query(ctx context.Context, recordType string, domainName stri
 		resp, rtt, age, err = r.doQuery(ctx, frame.q, addr, rs.Trace)
 		if isTerminal(resp, err) {
 			return rs, fmt.Errorf("%s %s: %w", rs.Type, rs.Name, err)
+		}
+
+		if errors.Is(err, syscall.ENETUNREACH) {
+			if ip.To4() != nil {
+				r.ip4disabled = true
+			} else {
+				r.ip6disabled = true
+			}
 		}
 
 		if stack.size() > 1 && empty(resp) {
