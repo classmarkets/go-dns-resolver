@@ -12,12 +12,15 @@ import (
 // TimeoutPolicy determines the round-trip timeout for a single DNS query.
 //
 // recordType is the type of the record set to be queried, such as "A",
-// "AAAA", "SRV", etc. domainName is the fully qualified name to be queried,
-// with the trailing dot is omitted. nameServerAddress is the IP address and
-// port of the server to query.
+// "AAAA", "SRV", etc.
+//
+// domainName is the fully qualified name to be queried, with the trailing dot
+// is omitted.
+//
+// nameServerAddress is the IP address and port of the server to query.
 //
 // Any non-positive duration is understood as an infinite timeout.
-type TimeoutPolicy func(recordType, domainName string, nameServerAddress string) (timeout time.Duration)
+type TimeoutPolicy func(recordType, domainName, nameServerAddress string) (timeout time.Duration)
 
 // DefaultTimeoutPolicy returns the default TimeoutPolicy. It is used by
 // Resolver.Query if Resolver.TimeoutPolicy is nil.
@@ -30,7 +33,7 @@ func DefaultTimeoutPolicy() TimeoutPolicy {
 	return defaultTimeoutPolicy
 }
 
-func defaultTimeoutPolicy(recordType, domainName string, nameServerAddress string) time.Duration {
+func defaultTimeoutPolicy(recordType, domainName, nameServerAddress string) time.Duration {
 	ipStr, _, err := net.SplitHostPort(nameServerAddress)
 	if err != nil {
 		panic(err)
@@ -47,7 +50,7 @@ func defaultTimeoutPolicy(recordType, domainName string, nameServerAddress strin
 }
 
 // PrivateNets is used by DefaultTimeoutPolicy to return a low timeout for
-// destination addresses in one of these subnets.
+// server addresses in one of these subnets.
 var PrivateNets = []*net.IPNet{
 	mustParseCIDR("10.0.0.0/8"),
 	mustParseCIDR("127.0.0.0/8"),

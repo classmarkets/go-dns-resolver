@@ -72,8 +72,8 @@ type resolver struct {
 	seen              map[string]map[dns.Question]struct{} // used to detect cycles
 }
 
-// New returns a new Resolver that resolves all queries recursively starting at
-// the root name servers, and uses the DefaultTimeoutPolicy and
+// New returns a new Resolver that resolves all queries recursively starting
+// at the root name servers, and uses the DefaultTimeoutPolicy and
 // DefaultCachePolicy.
 func New() *Resolver {
 	return &Resolver{
@@ -312,8 +312,8 @@ func (r *resolver) Query(ctx context.Context, recordType string, domainName stri
 		}
 
 		if stack.size() > 1 && empty(resp) {
-			// We're trying to figure out the addresses for a name server but
-			// we didn't get any records back. If we tried to find IPv6
+			// We're trying to figure out the address(es) for a name server
+			// but we didn't get any records back. If we tried to find IPv6
 			// addresses and IPv4 is also supported, don't give up yet. Try
 			// again, this time with A records.
 			if frame.q.Qtype == dns.TypeAAAA && !r.ip4disabled {

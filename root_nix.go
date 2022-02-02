@@ -17,7 +17,7 @@ func (r *Resolver) discoverSystemServers() ([]string, error) {
 
 	var addrs []string
 	for _, addr := range config.Servers {
-		addrs = append(addrs, net.JoinHostPort(addr, r.defaultPort))
+		addrs = append(addrs, net.JoinHostPort(addr, "53"))
 	}
 
 	return addrs, nil
