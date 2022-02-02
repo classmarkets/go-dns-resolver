@@ -342,7 +342,17 @@ func (r *resolver) Query(ctx context.Context, recordType string, domainName stri
 			continue
 		}
 
-		if resp.Rcode != dns.RcodeSuccess {
+		if stack.size() == 0 {
+			switch resp.Rcode {
+			case dns.RcodeSuccess:
+			case dns.RcodeNameError:
+				return rs, fmt.Errorf("%s %s: %w", rs.Type, rs.Name, ErrNXDomain)
+			case dns.RcodeServerFailure:
+				continue
+			default:
+				return rs, fmt.Errorf("%s %s: %s", rs.Type, rs.Name, dns.RcodeToString[resp.Rcode])
+			}
+		} else if resp.Rcode != dns.RcodeSuccess {
 			continue
 		}
 
