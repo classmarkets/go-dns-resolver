@@ -3,7 +3,6 @@ package dnsresolver
 import (
 	"context"
 	"errors"
-	"net"
 	"strings"
 	"testing"
 	"time"
@@ -12,13 +11,13 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestResolver_SetSystemServers_AddressNormalization(t *testing.T) {
+func TestResolver_SetBootstrapServers_AddressNormalization(t *testing.T) {
 	t.Parallel()
 
 	t.Run("valid", func(t *testing.T) {
 		r := New()
 
-		err := r.SetSystemServers("127.0.0.1", "127.0.0.2:5353")
+		err := r.SetBootstrapServers("127.0.0.1", "127.0.0.2:5353")
 
 		assert.NoError(t, err)
 		assert.Equal(t, r.systemServerAddrs, []string{"127.0.0.1:53", "127.0.0.2:5353"})
@@ -26,7 +25,7 @@ func TestResolver_SetSystemServers_AddressNormalization(t *testing.T) {
 	t.Run("unique", func(t *testing.T) {
 		r := New()
 
-		err := r.SetSystemServers("127.0.0.1", "127.0.0.1:53")
+		err := r.SetBootstrapServers("127.0.0.1", "127.0.0.1:53")
 
 		assert.NoError(t, err)
 		assert.Equal(t, r.systemServerAddrs, []string{"127.0.0.1:53"})
@@ -34,7 +33,7 @@ func TestResolver_SetSystemServers_AddressNormalization(t *testing.T) {
 	t.Run("invalid", func(t *testing.T) {
 		r := New()
 
-		err := r.SetSystemServers("127.0.0.1", "localhost:5353")
+		err := r.SetBootstrapServers("127.0.0.1", "localhost:5353")
 
 		assert.EqualError(t, err, "not an ip address: localhost:5353")
 		assert.Len(t, r.systemServerAddrs, 0)
@@ -50,7 +49,7 @@ func TestResolver_Query_SimpleARecord(t *testing.T) {
 	comSrv := NewTestServer(t, "127.0.0.100:"+r.defaultPort)
 	expSrv := NewTestServer(t, "127.0.0.101:"+r.defaultPort)
 
-	r.systemServerAddrs = []string{net.JoinHostPort(rootSrv.IP(), r.defaultPort)}
+	r.SetBootstrapServers(rootSrv.IP())
 
 	rootSrv.ExpectQuery("A www.example.com.").DelegateTo("com.", comSrv.IP())
 	comSrv.ExpectQuery("A www.example.com.").DelegateTo("example.com.", expSrv.IP()).ViaAuthoritySection()
@@ -103,7 +102,7 @@ func TestResolver_Query_Fallback(t *testing.T) {
 	errSrv := NewTestServer(t, "127.0.0.101:"+r.defaultPort)
 	expSrv := NewTestServer(t, "127.0.0.102:"+r.defaultPort)
 
-	r.systemServerAddrs = []string{net.JoinHostPort(rootSrv.IP(), r.defaultPort)}
+	r.SetBootstrapServers(rootSrv.IP())
 
 	rootSrv.ExpectQuery("A www.example.com.").DelegateTo("com.", comSrv.IP())
 	comSrv.ExpectQuery("A www.example.com.").DelegateTo("example.com.", errSrv.IP(), expSrv.IP())
@@ -159,7 +158,7 @@ func TestResolver_Query_CNAMEResolution(t *testing.T) {
 	comSrv := NewTestServer(t, "127.0.0.100:"+r.defaultPort)
 	expSrv := NewTestServer(t, "127.0.0.101:"+r.defaultPort)
 
-	r.systemServerAddrs = []string{net.JoinHostPort(rootSrv.IP(), r.defaultPort)}
+	r.SetBootstrapServers(rootSrv.IP())
 
 	rootSrv.ExpectQuery("A example.com.").DelegateTo("com.", comSrv.IP())
 	comSrv.ExpectQuery("A example.com.").DelegateTo("example.com.", expSrv.IP())
@@ -214,7 +213,7 @@ func TestResolver_Query_ZoneGap(t *testing.T) {
 	netSrv := NewTestServer(t, "127.0.0.101:"+r.defaultPort)
 	expSrv := NewTestServer(t, "127.0.0.102:"+r.defaultPort)
 
-	r.systemServerAddrs = []string{net.JoinHostPort(rootSrv.IP(), r.defaultPort)}
+	r.SetBootstrapServers(rootSrv.IP())
 
 	rootSrv.ExpectQuery("A example.com.").DelegateTo("com.", comSrv.IP())
 	comSrv.ExpectQuery("A example.com.").DelegateTo("example.com.", "ns1.test.net.")
@@ -281,7 +280,7 @@ func TestResolver_Query_NameFallback(t *testing.T) {
 	dd24Srv := NewTestServer(t, "127.0.0.103:"+r.defaultPort)
 	awsSrv := NewTestServer(t, "127.0.0.104:"+r.defaultPort)
 
-	r.systemServerAddrs = []string{net.JoinHostPort(rootSrv.IP(), r.defaultPort)}
+	r.SetBootstrapServers(rootSrv.IP())
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -353,7 +352,7 @@ func TestResolver_Query_DetectCycle(t *testing.T) {
 	comSrv := NewTestServer(t, "127.0.0.100:"+r.defaultPort)
 	netSrv := NewTestServer(t, "127.0.0.101:"+r.defaultPort)
 
-	r.systemServerAddrs = []string{net.JoinHostPort(rootSrv.IP(), r.defaultPort)}
+	r.SetBootstrapServers(rootSrv.IP())
 
 	rootSrv.ExpectQuery("A example.com.").DelegateTo("com.", comSrv.IP())
 	comSrv.ExpectQuery("A example.com.").DelegateTo("example.com.", "ns1.test.net.")
@@ -385,7 +384,7 @@ func TestResolver_Query_NS(t *testing.T) {
 	comSrv := NewTestServer(t, "127.0.0.100:"+r.defaultPort)
 	expSrv := NewTestServer(t, "127.0.0.101:"+r.defaultPort)
 
-	r.systemServerAddrs = []string{net.JoinHostPort(rootSrv.IP(), r.defaultPort)}
+	r.SetBootstrapServers(rootSrv.IP())
 
 	rootSrv.ExpectQuery("NS www.example.com.").DelegateTo("com.", comSrv.IP())
 	comSrv.ExpectQuery("NS www.example.com.").DelegateTo("example.com", expSrv.IP())
@@ -420,7 +419,7 @@ func TestResolver_Query_Caching_DefaultPolicy(t *testing.T) {
 	comSrv := NewTestServer(t, "127.0.0.100:"+r.defaultPort)
 	expSrv := NewTestServer(t, "127.0.0.101:"+r.defaultPort)
 
-	r.systemServerAddrs = []string{net.JoinHostPort(rootSrv.IP(), r.defaultPort)}
+	r.SetBootstrapServers(rootSrv.IP())
 
 	rootSrv.ExpectQuery("NS www.example.com.").DelegateTo("com.", comSrv.IP())
 	comSrv.ExpectQuery("NS www.example.com.").DelegateTo("example.com.", expSrv.IP())
@@ -459,7 +458,7 @@ func TestResolver_Query_Caching_ObeyResponderAdvice(t *testing.T) {
 	comSrv := NewTestServer(t, "127.0.0.100:"+r.defaultPort)
 	expSrv := NewTestServer(t, "127.0.0.101:"+r.defaultPort)
 
-	r.systemServerAddrs = []string{net.JoinHostPort(rootSrv.IP(), r.defaultPort)}
+	r.SetBootstrapServers(rootSrv.IP())
 
 	rootSrv.ExpectQuery("A www.example.com.").DelegateTo("com.", comSrv.IP())
 	comSrv.ExpectQuery("A www.example.com.").DelegateTo("example.com.", expSrv.IP())

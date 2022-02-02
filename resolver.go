@@ -84,23 +84,19 @@ func New() *Resolver {
 	}
 }
 
-// SetSystemServers specifies the IP addresses and, optionally, ports for the
-// resolver(s) of the operating system. These servers are only used to discover
-// the root name servers.
+// SetBootstrapServers specifies the IP addresses and, optionally, ports for
+// the name servers that are used to discover the root name servers. By
+// default the name servers configured in the operating system are used.
 //
 // This method is intended mostly for testing this package, but is also useful
 // if the operating system's resolver can't be trusted to query the root zone
 // correctly, or if automatic detection fails.
 //
-// If SetSystemServers has not been called when Query is first called, Resolver
+// If SetBootstrapServers has not been called when Query is first called, Resolver
 // will attempt to discover the operating system's resolver(s). This is
 // platform specific. For instance, on *nix systems, /etc/resolv.conf is
 // parsed.
-//
-// Calling SetSystemServers after the first call to Query has no effect,
-// because these servers are only used once to discover the root servers and
-// the list of root servers is cached forever.
-func (r *Resolver) SetSystemServers(serverAddresses ...string) error {
+func (r *Resolver) SetBootstrapServers(serverAddresses ...string) error {
 	serverAddresses, err := r.normalizeAddrs(serverAddresses)
 	if err != nil {
 		return err
@@ -128,7 +124,7 @@ func (r *Resolver) normalizeAddrs(addrs []string) ([]string, error) {
 		}
 
 		if port == "" {
-			port = "53"
+			port = r.defaultPort
 		}
 		addr = net.JoinHostPort(ip, port)
 
