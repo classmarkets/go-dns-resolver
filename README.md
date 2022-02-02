@@ -9,6 +9,8 @@ go-dns-resolver is built on top of the excellent [miekg/dns][miekgdns] package,
 but provides a much higher-level API. The priority here is usage ergonomics for
 the common cases, not completeness or performance.
 
+Package documentation: https://pkg.go.dev/github.com/classmarkets/go-dns-resolver
+
 [^1]: The system resolver is used to discover the root name servers unless
   configured otherwise; gotta start somewhere.
 
@@ -33,7 +35,6 @@ domain := "one.example.com"
 recordSet, err := r.Query(ctx, "A", domain)
 if errors.Is(err, dnsresolver.ErrNXDomain) {
     log.Println("Record not found")
-
 } else if err != nil {
     log.Fatal(err)
 }
@@ -81,7 +82,6 @@ adjusted as necessary:
 
 
 ```go
-
 ctx := context.Background()
 
 // total timeout for all required DNS queries
@@ -122,7 +122,6 @@ cannot be trusted to deliver the correct root name servers, the set of initial
 name servers can be specified explicitly.
 
 ```go
-
 ctx := context.Background()
 
 r := dnsresolver.New()
