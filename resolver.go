@@ -7,7 +7,6 @@ import (
 	"net"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/classmarkets/go-dns-resolver/cache"
@@ -48,8 +47,10 @@ type Resolver struct {
 	// the real world and "5354" in tests.
 	defaultPort string
 
-	ip4disabled bool
-	ip6disabled bool
+	// DisableIP4 and DisableIP6 prevent the resolver from contacting DNS
+	// servers on IPv4 and IPv6 addresses, respectively.
+	DisableIP4 bool
+	DisableIP6 bool
 
 	systemServerAddrs []string
 
@@ -245,8 +246,8 @@ func (R *Resolver) Query(ctx context.Context, recordType string, domainName stri
 		CachePolicy:       R.CachePolicy,
 		logFunc:           R.logFunc,
 		defaultPort:       R.defaultPort,
-		ip4disabled:       R.ip4disabled,
-		ip6disabled:       R.ip6disabled,
+		ip4disabled:       R.DisableIP4,
+		ip6disabled:       R.DisableIP6,
 		cache:             R.cache,
 		systemServerAddrs: R.systemServerAddrs,
 		seen:              map[string]map[dns.Question]struct{}{},
@@ -300,14 +301,6 @@ func (r *resolver) Query(ctx context.Context, recordType, domainName string, rs 
 		resp, rtt, age, err = r.doQuery(ctx, frame.q, addr, rs.Trace)
 		if isTerminal(resp, err) {
 			return rs, fmt.Errorf("%s %s: %w", rs.Type, rs.Name, err)
-		}
-
-		if errors.Is(err, syscall.ENETUNREACH) {
-			if ip.To4() != nil {
-				r.ip4disabled = true
-			} else {
-				r.ip6disabled = true
-			}
 		}
 
 		if stack.size() > 1 && empty(resp) {

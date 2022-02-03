@@ -342,7 +342,7 @@ func TestResolver_Query_DetectCycle(t *testing.T) {
 	r := New()
 	r.defaultPort = "5354"
 	r.logFunc = DebugLog(t)
-	r.ip6disabled = true
+	r.DisableIP6 = true
 
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 	defer cancel()
