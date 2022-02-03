@@ -157,61 +157,40 @@ func (r *Resolver) ClearCache() {
 // domainName is always understood as a fully qualified domain, making the
 // trailing dot optional.
 //
-// Name servers are discovered starting at the global root name servers, unless
-// the servers for a relevant zone have been specified with WithZoneServer.
-//
 // Timeouts are applied according to the TimeoutPolicy. If a timeout occurs,
 // context.DeadlineExceeded is returned but it may be wrapped and must be
 // tested for with errors.Is.
 //
 // Query populates the resolver's cache according to the configured
-// CachePolicy, however matching existing items in the cache are returned
+// CachePolicy, however matching existing items in the cache are used
 // independently of the CachePolicy.
 //
-// If a terminal error occurs, the record set for the last received response is
-// returned (which may be empty if the last response was an error response),
-// along with an error. If no query succeeds, a RecordSet with Type NXDOMAIN is
-// returned, along with an error.
+// If a terminal error occurs, an incomplete record set is returned, along
+// with an error.
 //
 // Concurrent calls to Query are safe, but public fields of the Resolver must
 // not be changed until all Query calls have returned.
 //
 // Most name servers are setup redundantly, i.e. NS responses include multiple
 // records. Such name servers are tried in the order they appear in in the
-// response, until one returns a response (even if the responses indicates an
-// error, such as NXDOMAIN) After any response has been received, no other
-// servers in the NS set are queried. For instance:
+// response until one returns a response (even if the response indicates an
+// error, such as NXDOMAIN). After any response other than SERVFAIL has been
+// received, no other servers in the NS set are queried. For instance:
 //
 //         QUERY            NAME SERVER               RESULT
 //     1)  NS com.          @a.root-servers.org.  ->  a.gtld-servers.net.
 //                                                    c.gtld-servers.net.
 //                                                    b.gtld-servers.net.
+//                                                    d.gtld-servers.net.
 //
 //     2)  NS example.com.  @a.gtld-servers.net.  ->  network timeout
 //
-//     3)  NS example.com.  @c.gtld-servers.net.  ->  NXDOMAIN
+//     3)  NS example.com.  @c.gtld-servers.net.  ->  SERVFAIL
 //
-// b.gtld-servers.net is not queried because c.gtld-servers.net. responded
+//     4)  NS example.com.  @b.gtld-servers.net.  ->  NXDOMAIN
+//
+// d.gtld-servers.net is not queried because b.gtld-servers.net. responded
 // (albeit with an NXDOMAIN error).
-//
-// If the name server returns an inconsistent record set,
-// - records with a name other than the domainName argument are ignored,
-// - records with a type other than the recordType argument are ignored,
-// - and RecordSet.TTL will be the smallest value amongst all other records,
-//
-// For instance, if the DNS response is as follows for whatever reason:
-//
-//     ;; QUESTION SECTION:
-//     ;example.com.                   IN      A
-//
-//     ;; ANSWER SECTION:
-//     example.com.            666     IN      A       192.0.2.0
-//     example.com.            555     IN      A       192.0.2.1
-//     foo.example.com.        444     IN      A       192.0.2.1
-//     example.com.            333     IN      AAAA    2001:db8::
-//
-// then Name will be "example.com", Type will be "A", TTL will be 555 seconds,
-// and values will be []string{"192.0.2.0", "192.0.2.1"}
 func (R *Resolver) Query(ctx context.Context, recordType string, domainName string) (RecordSet, error) {
 	rs := RecordSet{
 		Raw: dns.Msg{
