@@ -8,29 +8,6 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestIsPublicSuffix(t *testing.T) {
-	cases := []struct {
-		fqdn string
-		want bool
-	}{
-		{".", true},
-		{"com.", true},
-		{"foo.com.", false},
-		{"uk.", true},
-		{"co.uk.", true},
-		{"foo.co.uk.", false},
-		{"aero.", true},
-		{"airline.aero.", true},
-		{"foo.airline.aero.", false},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.fqdn, func(t *testing.T) {
-			assert.Equal(t, tc.want, isPublicSuffix(tc.fqdn), tc.fqdn)
-		})
-	}
-}
-
 func TestDefaultCachePolicy(t *testing.T) {
 	cases := []struct {
 		q         dns.Question

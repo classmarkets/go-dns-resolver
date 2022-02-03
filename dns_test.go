@@ -258,3 +258,28 @@ func TestNormalize(t *testing.T) {
 		})
 	}
 }
+
+func TestIsPublicSuffix(t *testing.T) {
+	cases := []struct {
+		fqdn string
+		want bool
+	}{
+		{".", true},
+		{"com.", true},
+		{"foo.com.", false},
+		{"uk.", true},
+		{"co.uk.", true},
+		{"foo.co.uk.", false},
+		{"aero.", true},
+		{"airline.aero.", true},
+		{"foo.airline.aero.", false},
+		{"in-addr.arpa.", true},
+		{"ip6.arpa.", true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.fqdn, func(t *testing.T) {
+			assert.Equal(t, tc.want, isPublicSuffix(tc.fqdn), tc.fqdn)
+		})
+	}
+}
