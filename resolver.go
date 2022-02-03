@@ -155,7 +155,10 @@ func (r *Resolver) ClearCache() {
 // "SRV", etc.
 //
 // domainName is always understood as a fully qualified domain, making the
-// trailing dot optional.
+// trailing dot optional. If recordType is "PTR", and domainName is a valid
+// IPv4 or IPv6 address, the IP address is converted into the correct .arpa
+// domain automatically, however, the Name field of the resulting RecordSet
+// still contains the IP address.
 //
 // Timeouts are applied according to the TimeoutPolicy. If a timeout occurs,
 // context.DeadlineExceeded is returned but it may be wrapped and must be
@@ -210,6 +213,13 @@ func (R *Resolver) Query(ctx context.Context, recordType string, domainName stri
 
 	if _, ok := dns.StringToType[recordType]; !ok {
 		return rs, fmt.Errorf("unsupported record type: %s", recordType)
+	}
+
+	if recordType == "PTR" {
+		if ip := net.ParseIP(domainName); ip != nil {
+			domainName = arpaName(ip)
+			rs.Raw.Question[0].Name = domainName
+		}
 	}
 
 	R.mu.Lock()

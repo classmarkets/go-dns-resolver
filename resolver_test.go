@@ -740,3 +740,55 @@ func TestResolver_Query_CoUkCaching(t *testing.T) {
 	t.Logf("Trace:\n" + rs.Trace.Dump())
 	assert.NoError(t, err)
 }
+
+func TestResolver_Query_PTR4(t *testing.T) {
+	r := New()
+	r.defaultPort = "5354"
+	r.logFunc = DebugLog(t)
+
+	rootSrv := NewRootServer(t, "127.0.0.250:"+r.defaultPort)
+	arpaSrv := NewTestServer(t, "127.0.0.100:"+r.defaultPort)
+
+	r.SetBootstrapServers(rootSrv.IP())
+
+	rootSrv.ExpectQuery("PTR 1.2.0.192.in-addr.arpa.").DelegateTo("in-addr.arpa.", arpaSrv.IP())
+	arpaSrv.ExpectQuery("PTR 1.2.0.192.in-addr.arpa.").Respond().
+		Answer(
+			PTR(t, "1.2.0.192.in-addr.arpa.", 321, "sample.test."),
+		)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+
+	rs, err := r.Query(ctx, "PTR", "192.0.2.1")
+	t.Logf("Trace:\n" + rs.Trace.Dump())
+	assert.NoError(t, err)
+	assert.Equal(t, "192.0.2.1", rs.Name)
+	assert.Equal(t, []string{"sample.test."}, rs.Values)
+}
+
+func TestResolver_Query_PTR6(t *testing.T) {
+	r := New()
+	r.defaultPort = "5354"
+	r.logFunc = DebugLog(t)
+
+	rootSrv := NewRootServer(t, "127.0.0.250:"+r.defaultPort)
+	arpaSrv := NewTestServer(t, "127.0.0.100:"+r.defaultPort)
+
+	r.SetBootstrapServers(rootSrv.IP())
+
+	rootSrv.ExpectQuery("PTR 1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.8.b.d.0.1.0.0.2.ip6.arpa.").DelegateTo("ip6.arpa.", arpaSrv.IP())
+	arpaSrv.ExpectQuery("PTR 1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.8.b.d.0.1.0.0.2.ip6.arpa.").Respond().
+		Answer(
+			PTR(t, "1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.8.b.d.0.1.0.0.2.ip6.arpa.", 321, "sample.test."),
+		)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+
+	rs, err := r.Query(ctx, "PTR", "2001:db8::1")
+	t.Logf("Trace:\n" + rs.Trace.Dump())
+	assert.NoError(t, err)
+	assert.Equal(t, "2001:db8::1", rs.Name)
+	assert.Equal(t, []string{"sample.test."}, rs.Values)
+}

@@ -63,6 +63,13 @@ func CNAME(t *testing.T, name string, ttl uint32, target string) *dns.CNAME {
 	return rr
 }
 
+func PTR(t *testing.T, name string, ttl uint32, ptr string) *dns.PTR {
+	rr := RR(t, dns.TypePTR, name, ttl).(*dns.PTR)
+	rr.Ptr = ptr
+
+	return rr
+}
+
 func TestNormalize(t *testing.T) {
 	cases := []struct {
 		answer     []dns.RR

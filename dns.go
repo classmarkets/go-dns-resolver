@@ -1,6 +1,8 @@
 package dnsresolver
 
 import (
+	"net"
+	"strconv"
 	"strings"
 	"time"
 
@@ -168,4 +170,43 @@ func isPublicSuffix(fqdn string) bool {
 	name := strings.TrimSuffix(fqdn, ".")
 	s, _ := publicsuffix.PublicSuffix(name)
 	return s == name
+}
+
+func arpaName(ip net.IP) string {
+	if ip := ip.To4(); ip != nil {
+		return arpaName4(ip)
+	}
+
+	return arpaName6(ip)
+}
+
+func arpaName4(ip net.IP) string {
+	if len(ip) != 4 {
+		panic("arpaName4: not four bytes")
+	}
+
+	labels := make([]string, 5)
+	for i := 0; i < 4; i++ {
+		labels[i] = strconv.FormatUint(uint64(ip[3-i]), 10)
+	}
+	labels[4] = "in-addr.arpa."
+
+	return strings.Join(labels, ".")
+}
+
+func arpaName6(ip net.IP) string {
+	if len(ip) != 16 {
+		panic("arpaName6: not sixteen bytes: " + strconv.Itoa(len(ip)))
+	}
+
+	labels := make([]string, 33)
+
+	for i := 0; i < 16; i++ {
+		labels[i*2+0] = strconv.FormatUint(uint64(ip[15-i])&0xF, 16)
+		labels[i*2+1] = strconv.FormatUint(uint64(ip[15-i])>>4, 16)
+	}
+
+	labels[32] = "ip6.arpa."
+
+	return strings.Join(labels, ".")
 }
