@@ -5,12 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
 
 	"github.com/classmarkets/go-dns-resolver/cache"
 	"github.com/miekg/dns"
+	"golang.org/x/net/publicsuffix"
 )
 
 // Resolver resolves DNS queries recursively.
@@ -266,7 +268,7 @@ func (R *Resolver) Query(ctx context.Context, recordType string, domainName stri
 	return r.Query(ctx, recordType, domainName, rs)
 }
 
-func (r *resolver) Query(ctx context.Context, recordType string, domainName string, rs RecordSet) (RecordSet, error) {
+func (r *resolver) Query(ctx context.Context, recordType, domainName string, rs RecordSet) (RecordSet, error) {
 	var stack stack
 
 	rootAddrs, err := r.discoverRootServers(ctx, rs.Trace)
@@ -276,10 +278,9 @@ func (r *resolver) Query(ctx context.Context, recordType string, domainName stri
 	if len(rootAddrs) == 0 {
 		return rs, errors.New("no IP addresses in root name server query")
 	}
-
 	stack.push(&stackFrame{
 		q:     rs.Raw.Question[0],
-		addrs: rootAddrs,
+		addrs: r.nsAddrs(rs.Raw.Question[0].Name, rootAddrs),
 	})
 
 	var resp *dns.Msg
@@ -336,6 +337,7 @@ func (r *resolver) Query(ctx context.Context, recordType string, domainName stri
 					frame.q.Qtype = dns.TypeAAAA
 				}
 				frame.altNames = frame.altNames[1:]
+				rootAddrs := r.nsAddrs(frame.q.Name, rootAddrs)
 				addr = rootAddrs[0]
 				frame.addrs = rootAddrs[1:]
 
@@ -360,8 +362,6 @@ func (r *resolver) Query(ctx context.Context, recordType string, domainName stri
 		} else if resp.Rcode != dns.RcodeSuccess {
 			continue
 		}
-
-		// TODO: cache addresses of TLD servers
 
 		if isAuthoritative(resp) {
 			stack.pop()
@@ -392,7 +392,7 @@ func (r *resolver) Query(ctx context.Context, recordType string, domainName stri
 					Qclass: dns.ClassINET,
 				},
 				altNames: names[1:],
-				addrs:    rootAddrs,
+				addrs:    r.nsAddrs(names[0], rootAddrs),
 			})
 		} else {
 			return rs, errors.New("empty response")
@@ -446,6 +446,36 @@ func (r *resolver) discoverRootServers(ctx context.Context, trace *Trace) ([]str
 	}
 
 	return nil, fmt.Errorf("discover root servers: %w", err)
+}
+
+func (r *resolver) nsAddrs(fqdn string, rootAddrs []string) []string {
+	var tld string
+	if fqdn == "." {
+		tld = "."
+	} else {
+		fqdn = strings.TrimRight(fqdn, ".")
+
+		tld, _ = publicsuffix.PublicSuffix(fqdn) // TODO: .co.uk doesn't work
+		tld = dns.CanonicalName(tld)
+	}
+
+	msg, _, _ := r.cache.Lookup(dns.Question{Name: tld}, "ns_set")
+	if msg != nil {
+		addrs, _ := r.referrals(msg)
+		if len(addrs) > 0 {
+			return addrs
+		}
+	}
+
+	if fqdn == "." {
+		return rootAddrs
+	}
+
+	// If the lookup for, say, co.uk didn't work, try .uk too
+
+	labels := dns.SplitDomainName(fqdn)
+
+	return r.nsAddrs(strings.Join(labels[1:], ".")+".", rootAddrs)
 }
 
 func isTerminal(resp *dns.Msg, err error) bool {
@@ -566,6 +596,10 @@ func (r *resolver) doQuery(ctx context.Context, q dns.Question, addr string, tra
 			age = 0
 			tn.Age = 0
 			r.cache.Update(q, addr, resp, ttl)
+
+			if tld, _, ok := checkTLDNSSet(resp); ok {
+				r.cache.Update(dns.Question{Name: tld}, "ns_set", resp, ttl)
+			}
 		}
 	}
 

@@ -56,9 +56,17 @@ func TestDefaultCachePolicy(t *testing.T) {
 			q: dns.Question{Qtype: dns.TypeA, Name: "bbc.co.uk."},
 			authority: []dns.RR{
 				NS(t, "uk.", 172800, "nsa.nic.uk."),
-				NS(t, "co.uk.", 172800, "nsa.nic.uk."),
+				NS(t, "uk.", 172800, "nsb.nic.uk."),
 			},
 			want: 172800 * time.Second,
+		},
+		{
+			q: dns.Question{Qtype: dns.TypeA, Name: "bbc.co.uk."},
+			authority: []dns.RR{
+				NS(t, "uk.", 172800, "nsa.nic.uk."),
+				NS(t, "co.uk.", 172800, "nsa.nic.uk."),
+			},
+			want: 0,
 		},
 		{
 			q: dns.Question{Qtype: dns.TypeA, Name: "bbc.co.uk."},

@@ -2,8 +2,10 @@ package dnsresolver
 
 import (
 	"strings"
+	"time"
 
 	"github.com/miekg/dns"
+	"golang.org/x/net/publicsuffix"
 )
 
 func empty(m *dns.Msg) bool {
@@ -132,4 +134,38 @@ func normalize(m *dns.Msg) []dns.RR {
 	dns.Dedup(xs, nil)
 
 	return xs
+}
+
+func checkTLDNSSet(msg *dns.Msg) (string, time.Duration, bool) {
+	var tld string
+	var ttl time.Duration
+
+	for i, rr := range append(msg.Answer, msg.Ns...) {
+		hdr := rr.Header()
+		if hdr.Rrtype != dns.TypeNS {
+			return "", 0, false
+		}
+		if !isPublicSuffix(hdr.Name) {
+			return "", 0, false
+		}
+
+		if tld == "" {
+			tld = hdr.Name
+		} else if hdr.Name != tld {
+			return "", 0, false
+		}
+
+		rrTTL := time.Duration(hdr.Ttl) * time.Second
+		if i == 0 || rrTTL < ttl {
+			ttl = rrTTL
+		}
+	}
+
+	return tld, ttl, true
+}
+
+func isPublicSuffix(fqdn string) bool {
+	name := strings.TrimSuffix(fqdn, ".")
+	s, _ := publicsuffix.PublicSuffix(name)
+	return s == name
 }

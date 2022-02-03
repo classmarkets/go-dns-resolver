@@ -129,7 +129,8 @@ func (ts *TestServer) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 
 	hs := ts.handlers[pattern]
 	if len(hs) == 0 {
-		ts.t.Errorf("Unexpected query: %s", pattern)
+		ts.t.Errorf("Unexpected query: %s @%s",
+			pattern, ts.PacketConn.LocalAddr())
 
 		m := new(dns.Msg)
 		m.SetRcode(r, dns.RcodeNotImplemented)

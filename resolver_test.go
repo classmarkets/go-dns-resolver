@@ -312,7 +312,6 @@ func TestResolver_Query_NameFallback(t *testing.T) {
 		awsSrv.ExpectQuery("AAAA ns-1094.awsdns-08.org.").Respond().Status(dns.RcodeServerFailure)
 		awsSrv.ExpectQuery("A ns-1094.awsdns-08.org.").Respond().Status(dns.RcodeServerFailure)
 
-		rootSrv.ExpectQuery("AAAA ns-180.awsdns-22.com.").DelegateTo("com.", comSrv.IP())
 		comSrv.ExpectQuery("AAAA ns-180.awsdns-22.com.").DelegateTo("awsdns-22.com.", awsSrv.IP())
 		awsSrv.ExpectQuery("AAAA ns-180.awsdns-22.com.").Respond().Status(dns.RcodeRefused)
 		awsSrv.ExpectQuery("A ns-180.awsdns-22.com.").Respond().
@@ -363,7 +362,6 @@ func TestResolver_Query_DetectCycle(t *testing.T) {
 			CNAME(t, "ns1.test.net.", 321, "ns2.test.net."),
 		)
 
-	rootSrv.ExpectQuery("A ns2.test.net.").DelegateTo("net.", netSrv.IP())
 	netSrv.ExpectQuery("A ns2.test.net.").Respond().
 		Answer(
 			CNAME(t, "ns2.test.net.", 321, "ns1.test.net."),
@@ -371,7 +369,7 @@ func TestResolver_Query_DetectCycle(t *testing.T) {
 
 	rs, err := r.Query(ctx, "A", "example.com")
 	t.Logf("Trace:\n" + rs.Trace.Dump())
-	assert.EqualError(t, err, "A example.com: circular reference: repeated query: A ns1.test.net. @127.0.0.250:5354")
+	assert.EqualError(t, err, "A example.com: circular reference: repeated query: A ns1.test.net. @127.0.0.101:5354")
 	assert.True(t, errors.Is(err, ErrCircular))
 }
 
@@ -700,4 +698,45 @@ func TestResolver_Referrals(t *testing.T) {
 			assert.Equal(t, tc.wantNames, names, "unexpected name set")
 		})
 	}
+}
+
+func TestResolver_Query_CoUkCaching(t *testing.T) {
+	r := New()
+	r.defaultPort = "5354"
+	r.logFunc = DebugLog(t)
+
+	rootSrv := NewRootServer(t, "127.0.0.250:"+r.defaultPort)
+	ukSrv := NewTestServer(t, "127.0.0.100:"+r.defaultPort)
+	bbcSrv := NewTestServer(t, "127.0.0.101:"+r.defaultPort)
+	govSrv := NewTestServer(t, "127.0.0.102:"+r.defaultPort)
+
+	r.SetBootstrapServers(rootSrv.IP())
+
+	rootSrv.ExpectQuery("A bbc.co.uk.").DelegateTo("uk.", ukSrv.IP())
+	ukSrv.ExpectQuery("A bbc.co.uk.").DelegateTo("ns.bbc.co.uk.", bbcSrv.IP())
+	bbcSrv.ExpectQuery("A bbc.co.uk.").Respond().
+		Answer(
+			A(t, "bbc.co.uk.", 321, "192.0.2.1"),
+		)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+
+	rs, err := r.Query(ctx, "A", "bbc.co.uk.")
+	t.Logf("Trace:\n" + rs.Trace.Dump())
+	assert.NoError(t, err)
+
+	// The public suffix for the first and second query is .co.uk, but the
+	// root server delegate .uk. The second query should start at ukSrv
+	// nonetheless.
+
+	ukSrv.ExpectQuery("A gov.co.uk.").DelegateTo("ns.gov.co.uk.", govSrv.IP())
+	govSrv.ExpectQuery("A gov.co.uk.").Respond().
+		Answer(
+			A(t, "gov.co.uk.", 321, "192.0.2.2"),
+		)
+
+	rs, err = r.Query(ctx, "A", "gov.co.uk.")
+	t.Logf("Trace:\n" + rs.Trace.Dump())
+	assert.NoError(t, err)
 }

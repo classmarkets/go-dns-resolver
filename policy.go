@@ -2,11 +2,7 @@ package dnsresolver
 
 import (
 	"net"
-	"strings"
 	"time"
-
-	"github.com/miekg/dns"
-	"golang.org/x/net/publicsuffix"
 )
 
 // TimeoutPolicy determines the round-trip timeout for a single DNS query.
@@ -93,29 +89,11 @@ func DefaultCachePolicy() CachePolicy {
 }
 
 func defaultCachePolicy(rs RecordSet) time.Duration {
-	var ttl time.Duration
-	for i, rr := range append(rs.Raw.Answer, rs.Raw.Ns...) {
-		hdr := rr.Header()
-		if hdr.Rrtype != dns.TypeNS {
-			return 0
-		}
-		if !isPublicSuffix(hdr.Name) {
-			return 0
-		}
-
-		rrTTL := time.Duration(hdr.Ttl) * time.Second
-		if i == 0 || rrTTL < ttl {
-			ttl = rrTTL
-		}
+	if _, ttl, ok := checkTLDNSSet(&rs.Raw); ok {
+		return ttl
 	}
 
-	return ttl
-}
-
-func isPublicSuffix(fqdn string) bool {
-	name := strings.TrimSuffix(fqdn, ".")
-	s, _ := publicsuffix.PublicSuffix(name)
-	return s == name
+	return 0
 }
 
 // ObeyResponderAdvice returns a CachePolicy that obeys the TTL advice that is
