@@ -449,7 +449,14 @@ func (r *resolver) discoverRootServers(ctx context.Context, trace *Trace) ([]str
 }
 
 func isTerminal(resp *dns.Msg, err error) bool {
-	return errors.Is(err, ErrCircular)
+	switch {
+	case errors.Is(err, ErrCircular),
+		errors.Is(err, context.Canceled),
+		errors.Is(err, context.DeadlineExceeded):
+		return true
+	default:
+		return false
+	}
 }
 
 func (r *resolver) referrals(m *dns.Msg) (ips, names []string) {
